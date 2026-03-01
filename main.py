@@ -25,8 +25,9 @@ from telegram.ext import (
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
-# ✅ Фіксований номер підтримки
-SUPPORT_PHONE = "+380968130807"
+# ✅ Фіксовані номери підтримки
+SUPPORT_PHONE_1 = "+380968130807"
+SUPPORT_PHONE_2 = "+380687294365"
 
 # ✅ Google Geocoding API Key
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
@@ -101,7 +102,6 @@ def locality_hint() -> str:
 
 
 def addr_prompt_text(kind: str) -> str:
-    # kind: "Звідки забрати?" / "Куди доставити?"
     return (
         f"{kind}\n\n"
         "✍️ Напиши адресу у форматі:\n"
@@ -127,7 +127,9 @@ def tariff_text() -> str:
 def support_text() -> str:
     return (
         "🛠 Підтримка\n"
-        f"📞 Наш номер: {SUPPORT_PHONE}\n\n"
+        f"📞 Наші номери:\n"
+        f"• {SUPPORT_PHONE_1}\n"
+        f"• {SUPPORT_PHONE_2}\n\n"
         "Натисни «📞 Зателефонуйте мені» або напиши свій номер — ми передзвонимо."
     )
 
@@ -215,12 +217,6 @@ def ensure_ua_suffix(addr: str) -> str:
 
 
 async def geocode_address_google(address: str) -> Optional[Tuple[float, float]]:
-    """
-    Google Geocoding API (тільки Україна):
-    - components=country:UA обмежує пошук країною
-    - region=ua, language=uk
-    - додаткова перевірка, що результат UA
-    """
     global _LAST_GOOGLE_TS
 
     addr = (address or "").strip()
@@ -232,7 +228,6 @@ async def geocode_address_google(address: str) -> Optional[Tuple[float, float]]:
     if addr in _GEOCODE_CACHE:
         return _GEOCODE_CACHE[addr]
 
-    # невеликий тротлінг, щоб не спамити API
     now = time.time()
     wait = 0.12 - (now - _LAST_GOOGLE_TS)  # ~8 req/s
     if wait > 0:
@@ -314,7 +309,7 @@ async def choice_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CHOICE
 
 
-# ✅ Підтримка: номер -> одразу адмінам + “як після замовлення”
+# ✅ Підтримка: “Зателефонуйте мені”
 async def callme_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text and update.message.text.strip() == "⬅️ Назад в меню":
         await update.message.reply_text("Повертаю в меню 👇", reply_markup=main_menu())
@@ -351,10 +346,11 @@ async def callme_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
 
     if ADMIN_CHAT_ID != 0:
-        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=urgent_msg, reply_markup=inline_kb)
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=urgent_msg)
 
+    # ✅ НОВИЙ текст як ти просив
     await update.message.reply_text(
-        "✅ Ваш запит прийнято. Очікуйте дзвінок від оператора.",
+        "🙏 Дякую за звернення! Очікуйте дзвінок від оператора.",
         reply_markup=main_menu()
     )
     return CHOICE
@@ -512,7 +508,7 @@ async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["phone"] = "" if txt.lower().startswith("пропуст") else txt
 
     await update.message.reply_text(
-        "Коментар (підʼїзд/поверх/час/оплата). Якщо нема — напиши «-»",
+        "Коментар (підʼїзд/поверх/номер замовлення/час/оплата). Якщо нема — напиши «-»",
         reply_markup=back_only_kb()
     )
     return COMMENT
