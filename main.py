@@ -1569,9 +1569,6 @@ if text == "📞 Зв’язатись з клієнтом":
     )
     return True
 
-
-    if text == "📦 Мої активні":
-
     if text == "📦 Мої активні":
         ids = courier_active_order_ids(uid)
         if not ids:
