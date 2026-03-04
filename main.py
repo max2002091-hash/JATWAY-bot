@@ -516,10 +516,7 @@ def support_text() -> str:
 
 def main_menu():
     return ReplyKeyboardMarkup(
-        [
-            ["🚚 Доставка", "💳 Тариф"],
-            ["📞 Зв’язатись з кур’єром", "🛠 Підтримка"],
-        ],
+        [["🚚 Доставка", "💳 Тариф", "🛠 Підтримка"]],
         resize_keyboard=True
     )
 
@@ -529,7 +526,6 @@ def courier_menu():
         [
             ["📦 Мої активні", "💳 Мій баланс"],
             ["⭐ Мій рейтинг"],
-            ["📞 Зв’язатись з клієнтом"],
             ["🆘 Техпідтримка"],
             ["⬅️ Клієнтське меню"],
         ],
@@ -844,11 +840,11 @@ def support_share_contact_kb() -> ReplyKeyboardMarkup:
     )
 
 
-def kb_contact_client_pick(orders: List[str]) -> InlineKeyboardMarkup:
+def kb_support_pick(orders: List[str]) -> InlineKeyboardMarkup:
     rows = []
     for oid in orders[:10]:
-        rows.append([InlineKeyboardButton(f"📞 №{oid}", callback_data=f"contact_client_pick:{oid}")])
-    rows.append([InlineKeyboardButton("❌ Скасувати", callback_data="contact_client_pick:cancel")])
+        rows.append([InlineKeyboardButton(f"🆘 №{oid}", callback_data=f"support_pick:{oid}")])
+    rows.append([InlineKeyboardButton("❌ Скасувати", callback_data="support_pick:cancel")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -879,7 +875,7 @@ def courier_active_order_ids(courier_id: int) -> List[str]:
     ids = []
     for oid, o in ORDERS_DB.items():
         if o.get("courier_id") == courier_id and o.get("status") not in ("closed",):
-            if o.get("status") in ("accepted", "await_customer", "await_finish"):
+            if o.get("status") in ("accepted", "await_customer", "await_finish", "searching"):
                 ids.append(oid)
     return ids
 
@@ -1506,72 +1502,6 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=courier_menu())
         return True
 
-
-    if text == "📞 Зв’язатись з клієнтом":
-        ids = courier_active_order_ids(uid)
-
-        if not ids:
-            await update.message.reply_text(
-                "❌ У вас немає активних замовлень.",
-                reply_markup=courier_menu()
-            )
-            return True
-
-        if len(ids) == 1:
-            oid = ids[0]
-            order = ORDERS_DB.get(oid)
-
-            if not order:
-                await update.message.reply_text(
-                    "⚠️ Замовлення не знайдено.",
-                    reply_markup=courier_menu()
-                )
-                return True
-
-            customer_id = order.get("customer_id")
-
-            if not customer_id:
-                await update.message.reply_text(
-                    "⚠️ У замовленні немає клієнта.",
-                    reply_markup=courier_menu()
-                )
-                return True
-
-            try:
-                chat = await context.bot.get_chat(int(customer_id))
-                username = chat.username
-
-                if username:
-                    await update.message.reply_text(
-                        f"📞 Написати клієнту (№{oid}):\nhttps://t.me/{username}",
-                        reply_markup=courier_menu()
-                    )
-                else:
-                    await update.message.reply_text(
-                        f"❌ У клієнта немає username (№{oid}).",
-                        reply_markup=courier_menu()
-                    )
-            except Exception:
-                await update.message.reply_text(
-                    "⚠️ Не вдалося отримати дані клієнта.",
-                    reply_markup=courier_menu()
-                )
-
-            return True
-
-        await update.message.reply_text(
-            "Оберіть замовлення 👇",
-            reply_markup=kb_contact_courier_pick(ids)
-        )
-        return True
-
-    # ⬇️ ОСЬ ЦЕ МАЄ БУТИ В КІНЦІ БЛОКУ
-    await update.message.reply_text(
-        "Оберіть замовлення 👇",
-        reply_markup=kb_contact_pick(ids)
-    )
-    return True
-
     if text == "📦 Мої активні":
         ids = courier_active_order_ids(uid)
         if not ids:
@@ -1648,43 +1578,6 @@ async def choice_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOICE
 
     text = (update.message.text or "").strip()
-    if text == "📞 Зв’язатись з кур’єром":
-        uid = update.effective_user.id
-        ids = customer_active_order_ids(uid)
-
-        if not ids:
-            await update.message.reply_text("❌ У вас немає активних замовлень.", reply_markup=main_menu())
-            return CHOICE
-
-        if len(ids) == 1:
-            oid = ids[0]
-            order = ORDERS_DB.get(oid)
-            if not order:
-                await update.message.reply_text("⚠️ Замовлення не знайдено.", reply_markup=main_menu())
-                return CHOICE
-
-            courier_id = order.get("courier_id")
-            if not courier_id:
-                await update.message.reply_text("⏳ Кур’єра ще не призначено. Очікуйте прийняття замовлення.", reply_markup=main_menu())
-                return CHOICE
-
-            try:
-                chat = await context.bot.get_chat(int(courier_id))
-                username = chat.username
-                if username:
-                    await update.message.reply_text(
-                        f"📞 Написати кур’єру (№{oid}):\nhttps://t.me/{username}",
-                        reply_markup=main_menu()
-                    )
-                else:
-                    await update.message.reply_text(f"❌ У кур’єра немає username (№{oid}).", reply_markup=main_menu())
-            except Exception:
-                await update.message.reply_text("⚠️ Не вдалося отримати дані кур’єра.", reply_markup=main_menu())
-
-            return CHOICE
-
-        await update.message.reply_text("Оберіть замовлення 👇", reply_markup=kb_contact_courier_pick(ids))
-        return CHOICE
 
     if text == "🚚 Доставка":
         # work hours only for clients
@@ -2105,6 +1998,7 @@ async def show_preconfirm_summary(update: Update, context: ContextTypes.DEFAULT_
         )
 
     await update.message.reply_text(summary, reply_markup=order_confirm_kb(), parse_mode="Markdown")
+    # === PART 2/2 START ===
 
 async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
@@ -2490,134 +2384,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # support pick 
-    # contact client pick (courier wants to message customer)
-    # courier -> pick order -> contact client
-    if data.startswith("contact_client_pick:"):
-        await query.answer()
-        val = data.split(":", 1)[1]
-
-        if val == "cancel":
-            try:
-                await query.edit_message_text("Скасовано ✅")
-            except Exception:
-                pass
-            return
-
-        order_id = val
-        order = ORDERS_DB.get(order_id)
-        if not order:
-            return await query.answer("Замовлення не знайдено.", show_alert=True)
-
-        courier_id = query.from_user.id
-        if courier_id != order.get("courier_id"):
-            return await query.answer("❌ Це не ваше замовлення.", show_alert=True)
-
-        customer_id = order.get("customer_id")
-        if not customer_id:
-            return await query.answer("⚠️ У замовленні немає клієнта.", show_alert=True)
-
-        try:
-            chat = await context.bot.get_chat(int(customer_id))
-            username = chat.username
-            text_out = (
-                f"📞 Написати клієнту (№{order_id}):\nhttps://t.me/{username}"
-                if username else
-                f"❌ У клієнта немає username (№{order_id})."
-            )
-            try:
-                await query.edit_message_text(text_out)
-            except Exception:
-                await context.bot.send_message(chat_id=courier_id, text=text_out)
-        except Exception:
-            return await query.answer("⚠️ Помилка отримання даних клієнта.", show_alert=True)
-
-        return
-
-    # customer -> pick order -> contact courier
-    if data.startswith("contact_courier_pick:"):
-        await query.answer()
-        val = data.split(":", 1)[1]
-
-        if val == "cancel":
-            try:
-                await query.edit_message_text("Скасовано ✅")
-            except Exception:
-                pass
-            return
-
-        order_id = val
-        order = ORDERS_DB.get(order_id)
-        if not order:
-            return await query.answer("Замовлення не знайдено.", show_alert=True)
-
-        customer_id = query.from_user.id
-        if customer_id != order.get("customer_id"):
-            return await query.answer("❌ Це не ваше замовлення.", show_alert=True)
-
-        courier_id = order.get("courier_id")
-        if not courier_id:
-            return await query.answer("⏳ Кур’єра ще не призначено.", show_alert=True)
-
-        try:
-            chat = await context.bot.get_chat(int(courier_id))
-            username = chat.username
-            text_out = (
-                f"📞 Написати кур’єру (№{order_id}):\nhttps://t.me/{username}"
-                if username else
-                f"❌ У кур’єра немає username (№{order_id})."
-            )
-            try:
-                await query.edit_message_text(text_out)
-            except Exception:
-                await context.bot.send_message(chat_id=customer_id, text=text_out)
-        except Exception:
-            return await query.answer("⚠️ Помилка отримання даних кур’єра.", show_alert=True)
-
-        return
-        # contact courier pick (customer wants to message courier)
-    if data.startswith("contact_courier_pick:"):
-        await query.answer()
-        val = data.split(":", 1)[1]
-
-        if val == "cancel":
-            try:
-                await query.edit_message_text("Скасовано ✅")
-            except Exception:
-                pass
-            return
-
-        order_id = val
-        order = ORDERS_DB.get(order_id)
-        if not order:
-            return await query.answer("Замовлення не знайдено.", show_alert=True)
-
-        customer_id = query.from_user.id
-        if customer_id != order.get("customer_id"):
-            return await query.answer("❌ Це не ваше замовлення.", show_alert=True)
-
-        courier_id = order.get("courier_id")
-        if not courier_id:
-            return await query.answer("⏳ Кур’єра ще не призначено.", show_alert=True)
-
-        try:
-            chat = await context.bot.get_chat(int(courier_id))
-            username = chat.username
-
-            if username:
-                text_out = f"📞 Написати кур’єру (№{order_id}):\nhttps://t.me/{username}"
-            else:
-                text_out = f"❌ У кур’єра немає username (№{order_id})."
-
-            try:
-                await query.edit_message_text(text_out)
-            except Exception:
-                await context.bot.send_message(chat_id=customer_id, text=text_out)
-
-        except Exception:
-            return await query.answer("⚠️ Помилка отримання даних кур’єра.", show_alert=True)
-
-        return
+    # support pick
     if data.startswith("support_pick:"):
         await query.answer()
         val = data.split(":", 1)[1]
