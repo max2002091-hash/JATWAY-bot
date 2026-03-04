@@ -1496,7 +1496,7 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"За {ym}: {avg_m:.2f} (відгуків: {cnt_m})\n\n"
             "🎁 **Бонус комісії:**\n"
             "Якщо за місяць рейтинг не нижче **4.80** і є мінімум **5 оцінок**, "
-            f"то комісія наступного місяця буде **{int(next_rate*100)}%**.\n"
+            f"то комісія наступного місяця буде **20%**.\n"
             "Якщо менше 5 оцінок — комісія залишається 25%."
         )
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=courier_menu())
