@@ -1645,7 +1645,7 @@ async def choice_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOICE
 
     text = (update.message.text or "").strip()
-        if text == "📞 Зв’язатись з кур’єром":
+    if text == "📞 Зв’язатись з кур’єром":
         uid = update.effective_user.id
         ids = customer_active_order_ids(uid)
 
