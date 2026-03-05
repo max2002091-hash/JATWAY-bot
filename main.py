@@ -1218,8 +1218,7 @@ async def owner_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             OWNER_PENDING.pop(owner_id, None)
             await update.message.reply_text(
                 f"✅ Видалено кур’єра: `{cid}`" if removed else f"ℹ️ Кур’єра `{cid}` не було у списку.",
-                parse_mode="Markdown"
-            )
+                parse_mode="Markdown")
             return
 
         if mode == "bal":
@@ -1709,8 +1708,6 @@ async def final_km_input_handler(update: Update, context: ContextTypes.DEFAULT_T
 # ===== Support contact ====
 # =========================
 async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Кур'єрська техпідтримка: приймаємо контакт-кнопкою або номер текстом.
-    # Надсилаємо в OWNER чат як текст + (якщо є) окремо contact-картку.
     if not is_private_chat(update):
         return
     if not update.message:
@@ -1723,50 +1720,31 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
     order_id = SUPPORT_CONTACT_PENDING.pop(courier_id, None)
 
     phone = "-"
-    contact_obj = update.message.contact
-    if contact_obj and contact_obj.phone_number:
-        phone = contact_obj.phone_number
+    if update.message.contact and update.message.contact.phone_number:
+        phone = update.message.contact.phone_number
     elif update.message.text:
         phone = update.message.text.strip()
 
     u = update.effective_user
-    username = f"@{u.username}" if u.username else "(без username)"
-
-    # Без Markdown, щоб не ловити помилки парсингу/символів
     msg = (
-        "🆘 Запит техпідтримки від кур'єра\n\n"
-        f"Кур'єр: {u.full_name} {username}\n"
-        f"ID: {u.id}\n"
+        "🆘 **Запит техпідтримки від кур'єра**\n\n"
+        f"Кур'єр: {u.full_name} (@{u.username or '-'})\n"
+        f"ID: `{u.id}`\n"
         f"Телефон: {phone}\n"
         f"Замовлення: №{order_id}\n"
     )
 
     if OWNER_CHAT_ID:
-        rm = kb_owner_force_close(order_id) if order_id else None
         try:
+            rm = kb_owner_force_close(order_id) if order_id else None
             await context.bot.send_message(
                 chat_id=OWNER_CHAT_ID,
                 text=msg,
+                parse_mode="Markdown",
                 reply_markup=rm,
             )
-            # Якщо є контакт-картка — спробуємо відправити її окремо (це зручніше адмінам)
-            if contact_obj and contact_obj.phone_number:
-                try:
-                    await context.bot.send_contact(
-                        chat_id=OWNER_CHAT_ID,
-                        phone_number=contact_obj.phone_number,
-                        first_name=contact_obj.first_name or u.full_name or "Courier",
-                        last_name=contact_obj.last_name or "",
-                    )
-                except Exception as e:
-                    # не критично — просто лог
-                    print("support_contact_handler send_contact failed:", repr(e))
-        except Exception as e:
-            print("support_contact_handler send_message failed:", repr(e))
-            await update.message.reply_text(
-                "❌ Не вдалося надіслати запит адміну. Перевір OWNER_CHAT_ID/доступ бота.",
-                reply_markup=courier_menu()
-            )
+        except Exception:
+            await update.message.reply_text("❌ Не вдалося надіслати запит адміну. Перевір OWNER_CHAT_ID/доступ бота.", reply_markup=courier_menu())
             return
 
     await update.message.reply_text("✅ Запит надіслано адміну. Очікуй дзвінок.", reply_markup=courier_menu())
@@ -2724,16 +2702,29 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # notify owner to confirm
         if OWNER_CHAT_ID:
-            await context.bot.send_message(
-                OWNER_CHAT_ID,
-                f"💳 Клієнт натиснув «Я оплатив гарантію»\n"
-                f"Замовлення №{order_id}\n"
-                f"User: {query.from_user.full_name} (@{query.from_user.username or '-'})\n"
-                f"ID: `{customer_id}`\n"
-                f"Коментар платежу має бути: `ГАРАНТІЯ №{order_id}`",
-                parse_mode="Markdown",
-                reply_markup=kb_owner_payment_confirm(order_id)
+            owner_text = (
+                "💳 Клієнт натиснув «Я оплатив гарантію»\\n"
+                f"Замовлення №{order_id}\\n"
+                f"User: {query.from_user.full_name} (@{query.from_user.username or '-'})\\n"
+                f"ID: {customer_id}\\n"
+                f"Коментар платежу має бути: ГАРАНТІЯ №{order_id}"
             )
+            try:
+                await context.bot.send_message(
+                    OWNER_CHAT_ID,
+                    owner_text,
+                    reply_markup=kb_owner_payment_confirm(order_id),
+                )
+            except Exception:
+                # Do not crash the callback on owner send errors
+                try:
+                    await context.bot.send_message(
+                        customer_id,
+                        "⚠️ Не вдалося надіслати запит адміну. Перевірте, що бот має доступ до owner-групи, і спробуйте ще раз.",
+                    )
+                except Exception:
+                    pass
+                return
 
         await query.edit_message_reply_markup(reply_markup=None)
         await context.bot.send_message(customer_id, "⏳ Зачекайте, підтверджуємо оплату гарантії…")
