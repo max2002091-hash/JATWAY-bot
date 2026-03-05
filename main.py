@@ -64,14 +64,14 @@ PORT = int(os.getenv("PORT", "8000"))
 # =========================
 # ===== Tariffs =====
 # =========================
-PRICE_SCHEDULED_BASE = 110
+PRICE_SCHEDULED_BASE = 120     # ✅ було 110
 PRICE_URGENT_BASE = 170
 BASE_KM = 2
-EXTRA_KM_PRICE = 23
+EXTRA_KM_PRICE = 20            # ✅ було 23
 EXTRA_OUTSIDE_OBUKHIV_PER_KM = 8
 
 JETWAY_FEE_RATE_DEFAULT = 0.25  # базово 25%
-DIST_SAFETY_MULT = 1.10  # +10% для авто-оцінки
+DIST_SAFETY_MULT = 1.0   # ✅ без +10%
 
 # Баланс: прогноз після fee не може бути нижче
 MIN_NEGATIVE_BALANCE = -50
@@ -522,10 +522,11 @@ def main_menu():
 
 
 def courier_menu():
+    # ✅ Додано "🆔 Мій ID"
     return ReplyKeyboardMarkup(
         [
             ["📦 Мої активні", "💳 Мій баланс"],
-            ["⭐ Мій рейтинг"],
+            ["⭐ Мій рейтинг", "🆔 Мій ID"],
             ["🆘 Техпідтримка"],
             ["⬅️ Клієнтське меню"],
         ],
@@ -792,9 +793,34 @@ def kb_customer_done(order_id: str) -> InlineKeyboardMarkup:
     ])
 
 
+def tme_url(username: str) -> Optional[str]:
+    u = (username or "").strip().lstrip("@")
+    if not u or u == "-":
+        return None
+    return f"https://t.me/{u}"
+
+
+def kb_contact_customer(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📞 Зв’язатись з клієнтом", callback_data=f"contact_customer:{order_id}")]
+    ])
+
+
+def kb_contact_courier(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📞 Зв’язатись з кур’єром", callback_data=f"contact_courier:{order_id}")]
+    ])
+
+
+def kb_close_after_manual(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Закрити замовлення", callback_data=f"close_manual:{order_id}")]
+    ])
+
+
 def finalize_kb(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Ціна вірна (авто, +10%)", callback_data=f"finish_auto:{order_id}")],
+        [InlineKeyboardButton("✅ Ціна вірна (авто)", callback_data=f"finish_auto:{order_id}")],
         [InlineKeyboardButton("✏️ Ввести фінальний км (без +10%)", callback_data=f"finish_manual:{order_id}")]
     ])
 
@@ -1297,6 +1323,10 @@ async def ask_customer_rating_if_needed(context: ContextTypes.DEFAULT_TYPE, orde
         courier_id = order.get("courier_id")
         customer_id = order.get("customer_id")
         order_id = order.get("order_id")
+        # ✅ дозволяємо оцінку текстом 1–5
+        pending = context.application.bot_data.get("rating_pending", {})
+        pending[int(customer_id)] = (str(order_id), int(courier_id))
+        context.application.bot_data["rating_pending"] = pending
         if not courier_id or not customer_id or not order_id:
             return
 
@@ -2106,6 +2136,15 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "admin_chat_id": dispatcher_chat_id(),
         "admin_msg_id": None,
         "is_urgent": is_urgent,
+
+        # ✅ для ручної фіналізації (після вводу км)
+        "manual_pending": False,
+        "manual_total": None,
+        "manual_fee": None,
+        "manual_dist": None,
+
+        # ✅ юзернейм кур’єра (заповнюється при прийнятті)
+        "courier_username": None,
     }
 
     # message to dispatcher
@@ -2175,6 +2214,20 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return CHOICE
 
+
+
+# =========================
+# ===== No-lambda handler ==
+# =========================
+async def buy_wait_paid_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Стан BUY_WAIT_PAID_CLICK: очікуємо тільки натискання inline-кнопок ("Я оплатив"/"Скасувати").
+    # Якщо користувач щось пише — просто повертаємо його в меню.
+    if update.message:
+        try:
+            await update.message.reply_text("Ок 👍", reply_markup=main_menu())
+        except Exception:
+            pass
+    return CHOICE
 
 # =========================
 # ===== Rating via text ====
@@ -2343,6 +2396,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         ok = db_try_add_rating(order_id, int(courier_id), int(customer_id), int(r))
+        if ok:
+            pending = context.application.bot_data.get("rating_pending", {})
+            pending.pop(int(customer_id), None)
+            context.application.bot_data["rating_pending"] = pending
         if not ok:
             return await query.answer("Оцінку вже враховано.", show_alert=True)
 
@@ -2447,6 +2504,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         order["courier_id"] = courier_id
         order["courier_name"] = query.from_user.full_name
+        order["courier_username"] = query.from_user.username or "-"
         order["status"] = "accepted"
 
         ACTIVE_ORDERS_COUNT[courier_id] = ACTIVE_ORDERS_COUNT.get(courier_id, 0) + 1
@@ -2489,8 +2547,27 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=info,
                 reply_markup=kb
             )
+            await context.bot.send_message(
+                chat_id=courier_id,
+                text=f"📞 Контакти по замовленню №{order_id}",
+                reply_markup=kb_contact_customer(order_id)
+            )
         except Exception:
             pass
+
+        # notify customer + contact button
+        customer_id = order.get("customer_id")
+        if customer_id:
+            cu = order.get("courier_username") or "-"
+            cu_url = tme_url(cu)
+            contact_lines = [f"🚚 Кур’єр призначений: {order.get('courier_name','-')} (@{cu})"]
+            if cu_url:
+                contact_lines.append(f"🔗 Telegram: {cu_url}")
+            await context.bot.send_message(
+                chat_id=customer_id,
+                text=("✅ Кур’єр взяв ваше замовлення №{oid}\n".format(oid=order_id) + "\n".join(contact_lines) + "\n\nНатисніть кнопку нижче, щоб отримати контакти 👇"),
+                reply_markup=kb_contact_courier(order_id)
+            )
 
         return
 
@@ -2643,6 +2720,42 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+
+
+    if data.startswith("close_manual:"):
+        await query.answer()
+        order_id = data.split(":", 1)[1]
+        order = ORDERS_DB.get(order_id)
+        if not order:
+            return await query.answer("Замовлення не знайдено.", show_alert=True)
+
+        if query.from_user.id != order.get("courier_id"):
+            return await query.answer("❌ Це не ваше замовлення.", show_alert=True)
+
+        if not order.get("manual_pending"):
+            return await query.answer("Немає ручної фіналізації для закриття.", show_alert=True)
+
+        final_total = int(order.get("manual_total") or order.get("total") or 0)
+        final_fee = int(order.get("manual_fee") or order.get("fee") or 0)
+        manual_dist = order.get("manual_dist")
+
+        await finalize_and_close_order(
+            context,
+            order_id,
+            final_total,
+            final_fee,
+            manual_dist=float(manual_dist) if manual_dist is not None else None,
+            closed_by="кур'єр (вручну)"
+        )
+
+        try:
+            await query.edit_message_text(
+                f"✅ №{order_id} закрито.\n💰 До сплати: {final_total} грн\n📉 Комісія: {final_fee} грн"
+            )
+        except Exception:
+            pass
+        return
+
     await query.answer("Невідома дія", show_alert=True)
 
 
@@ -2780,7 +2893,7 @@ def build_app() -> Application:
 
             BUY_LIST: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_list)],
             BUY_APPROX_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_approx_sum)],
-            BUY_WAIT_PAID_CLICK: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: CHOICE)],
+            BUY_WAIT_PAID_CLICK: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_wait_paid_noop)],
 
             ITEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, item)],
 
@@ -2848,3 +2961,4 @@ if __name__ == "__main__":
     main()
 
 # === PART 2/2 END ===
+
