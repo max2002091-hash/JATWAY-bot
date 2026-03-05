@@ -45,14 +45,13 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
 # ✅ Фіксовані номери підтримки (клієнтська)
 SUPPORT_PHONE_1 = "+380968130807"
-SUPPORT_PHONE_2 = "+380687294365"
 
 # Робочі години
 WORK_HOURS_START = os.getenv("WORK_HOURS_START", "10:00").strip()
 WORK_HOURS_END = os.getenv("WORK_HOURS_END", "22:00").strip()
 
 # Оплата / гарантія
-PAYMENT_CARD = os.getenv("PAYMENT_CARD", "4441111026102602").strip()
+PAYMENT_CARD = os.getenv("PAYMENT_CARD", "4035200043852653").strip()
 PAYMENT_RECEIVER_NAME = os.getenv("PAYMENT_RECEIVER_NAME", "Jetway Delivery").strip()
 
 REMINDER_BEFORE_CANCEL_MIN = int(os.getenv("REMINDER_BEFORE_CANCEL_MIN", "5"))
@@ -96,6 +95,7 @@ DB_PATH = os.path.join(DATA_DIR, "bot.sqlite3")
 # ===== In-memory state =====
 # =========================
 COURIERS: set[int] = set()
+BLACKLISTED_COURIERS: set[int] = set()
 COURIER_BALANCES: Dict[int, int] = {}
 ACTIVE_ORDERS_COUNT: Dict[int, int] = {}       # courier_id -> count
 ORDERS_DB: Dict[str, dict] = {}                # order_id -> data (active/in-flight)
@@ -203,6 +203,22 @@ def db_init():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS courier_blacklist (
+        courier_id INTEGER PRIMARY KEY,
+        reason TEXT,
+        added_at TEXT NOT NULL
+    )
+    """)
+
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS purchase_checks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         order_id TEXT NOT NULL,
@@ -231,6 +247,92 @@ def db_load_couriers_and_balances():
     con.close()
 
 
+
+
+def db_get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    con = db_connect()
+    cur = con.cursor()
+    cur.execute("SELECT value FROM settings WHERE key=?", (key,))
+    row = cur.fetchone()
+    con.close()
+    return row[0] if row else default
+
+
+def db_set_setting(key: str, value: str):
+    con = db_connect()
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO settings(key,value) VALUES(?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+    con.commit()
+    con.close()
+
+
+def db_load_settings_into_globals():
+    global WORK_HOURS_START, WORK_HOURS_END
+    ws = db_get_setting("work_hours_start")
+    we = db_get_setting("work_hours_end")
+    if ws:
+        WORK_HOURS_START = ws.strip()
+    if we:
+        WORK_HOURS_END = we.strip()
+
+
+def db_blacklist_load_cache():
+    BLACKLISTED_COURIERS.clear()
+    con = db_connect()
+    cur = con.cursor()
+    cur.execute("SELECT courier_id FROM courier_blacklist")
+    for (cid,) in cur.fetchall():
+        try:
+            BLACKLISTED_COURIERS.add(int(cid))
+        except Exception:
+            pass
+    con.close()
+
+
+def db_blacklist_add(courier_id: int, reason: str = ""):
+    con = db_connect()
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO courier_blacklist(courier_id, reason, added_at) VALUES(?,?,?) "
+        "ON CONFLICT(courier_id) DO UPDATE SET reason=excluded.reason, added_at=excluded.added_at",
+        (int(courier_id), (reason or "").strip(), datetime.now(TZ).isoformat()),
+    )
+    con.commit()
+    con.close()
+    BLACKLISTED_COURIERS.add(int(courier_id))
+
+
+def db_blacklist_remove(courier_id: int):
+    con = db_connect()
+    cur = con.cursor()
+    cur.execute("DELETE FROM courier_blacklist WHERE courier_id=?", (int(courier_id),))
+    con.commit()
+    con.close()
+    BLACKLISTED_COURIERS.discard(int(courier_id))
+
+
+def db_blacklist_list() -> List[Tuple[int, str, str]]:
+    con = db_connect()
+    cur = con.cursor()
+    cur.execute("SELECT courier_id, reason, added_at FROM courier_blacklist ORDER BY added_at DESC")
+    rows = cur.fetchall()
+    con.close()
+    out: List[Tuple[int, str, str]] = []
+    for cid, reason, added_at in rows:
+        try:
+            cid = int(cid)
+        except Exception:
+            continue
+        out.append((cid, reason or "", added_at or ""))
+    return out
+
+
+def is_blacklisted_courier(courier_id: int) -> bool:
+    return int(courier_id) in BLACKLISTED_COURIERS
 def db_add_courier(courier_id: int, username: str = "", full_name: str = ""):
     con = db_connect()
     cur = con.cursor()
@@ -555,8 +657,7 @@ def support_text() -> str:
     return (
         "🛠 Підтримка\n"
         f"📞 Наші номери:\n"
-        f"• {SUPPORT_PHONE_1}\n"
-        f"• {SUPPORT_PHONE_2}\n\n"
+        f"{SUPPORT_PHONE_1}\n\n"
         "Натисни «📞 Зателефонуйте мені» або напиши свій номер — ми передзвонимо."
     )
 
@@ -682,7 +783,10 @@ def owner_panel_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 Статистика: тиждень", callback_data="stats:week")],
         [InlineKeyboardButton("📊 Статистика: місяць", callback_data="stats:month")],
         [InlineKeyboardButton("📤 Експорт CSV за місяць", callback_data="export:month")],
+        [InlineKeyboardButton("🟢 Активні замовлення", callback_data="active:list")],
         [InlineKeyboardButton("📚 Закриті замовлення", callback_data="closed:list")],
+        [InlineKeyboardButton("⛔ Чорний список кур’єрів", callback_data="bl:list")],
+        [InlineKeyboardButton("⏰ Графік роботи", callback_data="wh:view")],
         [InlineKeyboardButton("⭐ Рейтинги кур’єрів", callback_data="ratings:list")],
         [InlineKeyboardButton("🧾 Архів чеків (викуп)", callback_data="checks:list")],
         [
@@ -1196,6 +1300,43 @@ async def owner_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     txt = update.message.text.strip()
 
+    if mode == "wh_set":
+        m = re.match(r"^\s*(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})\s*$", txt)
+        if not m:
+            await update.message.reply_text("❌ Формат невірний. Приклад: 10:00-22:00")
+            return
+        ws, we = m.group(1), m.group(2)
+        db_set_setting("work_hours_start", ws)
+        db_set_setting("work_hours_end", we)
+        db_load_settings_into_globals()
+        await update.message.reply_text(f"✅ Графік оновлено: {WORK_HOURS_START}–{WORK_HOURS_END}")
+        OWNER_PENDING.pop(owner_id, None)
+        return
+
+    if mode == "bl_add":
+        parts = txt.split(maxsplit=1)
+        try:
+            cid = int(parts[0])
+        except ValueError:
+            await update.message.reply_text("❌ Невірний ID.")
+            return
+        reason = parts[1] if len(parts) > 1 else ""
+        db_blacklist_add(cid, reason)
+        await update.message.reply_text(f"✅ Кур’єра {cid} додано в чорний список.")
+        OWNER_PENDING.pop(owner_id, None)
+        return
+
+    if mode == "bl_del":
+        try:
+            cid = int(txt.split()[0])
+        except ValueError:
+            await update.message.reply_text("❌ Невірний ID.")
+            return
+        db_blacklist_remove(cid)
+        await update.message.reply_text(f"✅ Кур’єра {cid} прибрано з чорного списку.")
+        OWNER_PENDING.pop(owner_id, None)
+        return
+
     if mode in ("add", "del", "bal", "setbal"):
         try:
             cid = int(txt.split()[0])
@@ -1336,19 +1477,26 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         ym = _month_key()
-        lines = []
+        today_str = datetime.now(TZ).strftime("%m.%d.%Y")
+
+        lines: List[str] = []
+        lines.append("⭐ Рейтинги кур’єрів")
+        lines.append(f"📅 {today_str}")
+        lines.append("ℹ️ Умова бонусу: рейтинг ≥4.80 та мінімум 5 оцінок за місяць")
+        lines.append("")
+
         for cid in sorted(COURIERS):
             avg_all, cnt_all = db_get_courier_rating(cid, None)
             avg_m, cnt_m = db_get_courier_rating(cid, ym)
             next_rate = db_calc_next_month_commission(cid)
-            lines.append(
-                f"• `{cid}` | all: {avg_all:.2f} ({cnt_all}) | {ym}: {avg_m:.2f} ({cnt_m}) | next fee: {int(next_rate*100)}%"
-            )
-        await context.bot.send_message(
-            OWNER_CHAT_ID,
-            "⭐ **Рейтинги кур’єрів**\n(умова бонусу: ≥4.80 та ≥5 оцінок за місяць)\n\n" + "\n".join(lines),
-            parse_mode="Markdown"
-        )
+
+            lines.append(f"🚚 Кур’єр: {cid}")
+            lines.append(f"⭐ За весь час: {avg_all:.2f} (оцінок: {cnt_all})")
+            lines.append(f"📊 За цей місяць ({ym[5:7]}.{ym[0:4]}): {avg_m:.2f} (оцінок: {cnt_m})")
+            lines.append(f"💰 Комісія наступного місяця: {int(next_rate*100)}%")
+            lines.append("")
+
+        await context.bot.send_message(OWNER_CHAT_ID, "\n".join(lines).strip())
         return
 
     
@@ -1384,16 +1532,63 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             )
 
         # Telegram має ліміт на довжину повідомлення — шлемо частинами
-        header = "📚 **Закриті замовлення (останні)**\n\n"
+        header = "📚 Закриті замовлення (останні)\n\n"
         chunk = ""
         for part in parts:
             if len(header) + len(chunk) + len(part) + 2 > 3800:
-                await context.bot.send_message(OWNER_CHAT_ID, header + chunk, parse_mode="Markdown")
+                await context.bot.send_message(OWNER_CHAT_ID, header + chunk)
                 chunk = ""
             chunk += part + "\n"
         if chunk:
-            await context.bot.send_message(OWNER_CHAT_ID, header + chunk, parse_mode="Markdown")
+            await context.bot.send_message(OWNER_CHAT_ID, header + chunk)
         return
+    
+    if data == "active:list":
+        # показати активні (не закриті) замовлення
+        active = [o for o in ORDERS_DB.values() if o and o.get("status") != "closed"]
+        if not active:
+            await context.bot.send_message(OWNER_CHAT_ID, "🟢 Активних замовлень зараз немає.")
+            return
+
+        # покажемо останні/актуальні 15
+        active = sorted(active, key=lambda x: str(x.get("order_id") or ""), reverse=True)[:15]
+
+        lines = []
+        buttons = []
+        for o in active:
+            oid = o.get("order_id")
+            mode = "ВИКУП" if o.get("delivery_mode") == "buy" else "ГОТОВЕ"
+            st = o.get("status") or "-"
+            courier = o.get("courier_name") or str(o.get("courier_id") or "-")
+            dist = o.get("dist_km")
+            dist_s = f"{float(dist):.1f}км" if dist is not None else "-"
+            total = o.get("total")
+            fee = o.get("fee")
+            lines.append(f"• №{oid} | {mode} | {st} | {dist_s} | {total} грн | fee {fee} | кур'єр: {courier}")
+            if oid:
+                buttons.append([InlineKeyboardButton(f"✅ Закрити №{oid}", callback_data=f"active:close:{oid}")])
+
+        await context.bot.send_message(
+            OWNER_CHAT_ID,
+            "🟢 Активні замовлення\n\n" + "\n".join(lines) + "\n\nНатисни кнопку, щоб закрити замовлення (спише комісію з кур’єра).",
+            reply_markup=InlineKeyboardMarkup(buttons[:10]) if buttons else None,
+        )
+        return
+
+    if data.startswith("active:close:"):
+        oid = data.split(":", 2)[2]
+        order = ORDERS_DB.get(oid)
+        if not order or order.get("status") == "closed":
+            await context.bot.send_message(OWNER_CHAT_ID, f"⚠️ Замовлення №{oid} не знайдено або вже закрито.")
+            return
+
+        final_total = int(order.get("total") or 0)
+        final_fee = int(order.get("fee") or 0)
+        manual_dist = None
+        await finalize_and_close_order(context, oid, final_total, final_fee, manual_dist, closed_by="owner")
+        await context.bot.send_message(OWNER_CHAT_ID, f"✅ №{oid} закрито (owner). Комісію списано.")
+        return
+
     if data == "checks:list":
         rows = db_get_checks(30)
         if not rows:
@@ -1501,6 +1696,59 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
 
+
+    if data == "wh:view":
+        msg = f"⏰ Графік роботи\n\nПоточний: {WORK_HOURS_START}–{WORK_HOURS_END}\n\nНатисни «✏️ Змінити», щоб встановити новий."
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Змінити", callback_data="wh:set")]])
+        await context.bot.send_message(OWNER_CHAT_ID, msg, reply_markup=kb)
+        return
+
+    if data == "wh:set":
+        OWNER_PENDING[owner_id] = "wh_set"
+        await context.bot.send_message(
+            OWNER_CHAT_ID,
+            "✏️ Введи новий графік у форматі `HH:MM-HH:MM`.\nПриклад: `10:00-22:00`",
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "bl:list":
+        rows = db_blacklist_list()
+        if not rows:
+            await context.bot.send_message(OWNER_CHAT_ID, "⛔ Чорний список порожній.")
+        else:
+            lines = ["⛔ Чорний список кур’єрів\n"]
+            for cid, reason, added_at in rows[:50]:
+                ds = added_at
+                try:
+                    dt = datetime.fromisoformat(added_at)
+                    ds = dt.strftime("%d.%m.%Y %H:%M")
+                except Exception:
+                    pass
+                r = (reason or "").strip()
+                lines.append(f"• {cid} | {ds}" + (f" | {r}" if r else ""))
+            await context.bot.send_message(OWNER_CHAT_ID, "\n".join(lines))
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("➕ Додати", callback_data="bl:add"), InlineKeyboardButton("➖ Видалити", callback_data="bl:del")]])
+        await context.bot.send_message(OWNER_CHAT_ID, "Керування чорним списком:", reply_markup=kb)
+        return
+
+    if data == "bl:add":
+        OWNER_PENDING[owner_id] = "bl_add"
+        await context.bot.send_message(
+            OWNER_CHAT_ID,
+            "➕ Введи `ID` або `ID причина`.\nПриклад: `123456789 спам/порушення`",
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "bl:del":
+        OWNER_PENDING[owner_id] = "bl_del"
+        await context.bot.send_message(
+            OWNER_CHAT_ID,
+            "➖ Введи `ID` кур’єра, щоб прибрати з чорного списку.\nПриклад: `123456789`",
+            parse_mode="Markdown"
+        )
+        return
 # =========================
 # ===== Group join notify =
 # =========================
@@ -1616,10 +1864,10 @@ async def finalize_and_close_order(
 
     if OWNER_CHAT_ID:
         report = (
-            f"🏁 **ЗАМОВЛЕННЯ №{order_id} ЗАКРИТО**\n"
+            f"🏁 ЗАМОВЛЕННЯ №{order_id} ЗАКРИТО\n"
             f"--------------------------\n"
             f"👤 Клієнт: {order.get('customer_name','-')} (@{order.get('customer_username','-')})\n"
-            f"🚚 Кур'єр: {order.get('courier_name','-')} (ID: `{courier_id}`)\n"
+            f"🚚 Кур'єр: {order.get('courier_name','-')} (ID: {courier_id})\n"
             f"🧾 Тип: {'🛒 ВИКУП' if order.get('delivery_mode')=='buy' else '📦 ГОТОВЕ'}\n"
             f"📏 Дистанція: {dist_line}\n"
             f"💰 Каса (клієнт сплатив): {final_total} грн\n"
@@ -1628,7 +1876,10 @@ async def finalize_and_close_order(
             + f"🔒 Закрив: {closed_by}\n"
             + f"🕒 Час: {now_str}\n"
         )
-        await context.bot.send_message(OWNER_CHAT_ID, report, parse_mode="Markdown")
+        try:
+            await context.bot.send_message(OWNER_CHAT_ID, report)
+        except Exception:
+            pass
 
     if courier_id:
         try:
@@ -1727,9 +1978,9 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
 
     u = update.effective_user
     msg = (
-        "🆘 **Запит техпідтримки від кур'єра**\n\n"
+        "🆘 Запит техпідтримки від кур'єра\n\n"
         f"Кур'єр: {u.full_name} (@{u.username or '-'})\n"
-        f"ID: `{u.id}`\n"
+        f"ID: {u.id}\n"
         f"Телефон: {phone}\n"
         f"Замовлення: №{order_id}\n"
     )
@@ -1861,6 +2112,9 @@ async def role_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if uid not in COURIERS:
             await update.message.reply_text("❌ Ви не є кур’єром. Якщо треба — зверніться до адміна.", reply_markup=role_menu())
             return ROLE_CHOICE
+        if is_blacklisted_courier(uid):
+            await update.message.reply_text("⛔ Ви заблоковані і не можете виконувати замовлення. Зверніться до адміністратора.", reply_markup=role_menu())
+            return ROLE_CHOICE
         await update.message.reply_text("✅ Ви кур’єр. Меню кур’єра 👇", reply_markup=courier_menu())
         return CHOICE
 
@@ -1911,15 +2165,15 @@ async def choice_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             order = ORDERS_DB.get(str(active_order_id))
             u = update.effective_user
             msg = (
-                "🆘 **Техпідтримка (клієнт)**\n\n"
+                "🆘 Техпідтримка (клієнт)\n\n"
                 f"Замовлення: №{active_order_id}\n"
                 f"Клієнт: {u.full_name} (@{u.username or '-'})\n"
-                f"ID: `{u.id}`\n"
+                f"ID: {u.id}\\n"
                 f"Телефон: {order.get('phone','-') if order else '-'}\n"
             )
             if OWNER_CHAT_ID:
                 try:
-                    await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown")
+                    await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg)
                 except Exception:
                     pass
             await update.message.reply_text("✅ Запит відправлено в техпідтримку. Очікуйте відповідь.", reply_markup=customer_active_menu())
@@ -2677,7 +2931,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = (query.data or "").strip()
 
     # owner panel
-    if data.startswith(("stats:", "export:", "ratings:", "checks:", "closed:", "owner:")):
+    if data.startswith(("stats:", "export:", "ratings:", "checks:", "closed:", "active:", "owner:", "bl:", "wh:")):
         return await owner_panel_callback(update, context)
 
     # guarantee payment flow
