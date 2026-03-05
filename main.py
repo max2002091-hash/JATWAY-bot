@@ -384,6 +384,36 @@ def db_calc_next_month_commission(courier_id: int) -> float:
     return 0.25
 
 
+
+async def show_my_rating(update: Update, context: ContextTypes.DEFAULT_TYPE, courier_id: int):
+    """Show courier rating + bonus rule info."""
+    avg_all, cnt_all = db_get_courier_rating(int(courier_id), None)
+    ym = _month_key()
+    avg_m, cnt_m = db_get_courier_rating(int(courier_id), ym)
+    next_fee = db_calc_next_month_commission(int(courier_id))
+    next_fee_pct = int(round(next_fee * 100))
+
+    bonus_text = (
+        "Бонус комісії:\n"
+        "Якщо за місяць рейтинг не нижче 4.80 і є мінімум 5 оцінок, то комісія наступного місяця буде 20%.\n"
+        "Якщо менше 5 оцінок — комісія залишається 25%."
+    )
+
+    msg = (
+        f"⭐ **Ваш рейтинг**\n\n"
+        f"За весь час: **{avg_all:.2f}** (оцінок: {cnt_all})\n"
+        f"Цей місяць ({ym}): **{avg_m:.2f}** (оцінок: {cnt_m})\n\n"
+        f"📉 Поточна комісія: **25%**\n"
+        f"📌 Комісія наступного місяця (за правилами): **{next_fee_pct}%**\n\n"
+        f"{bonus_text}"
+    )
+
+    if update.message:
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=courier_menu())
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(msg, parse_mode="Markdown", reply_markup=courier_menu())
+
+
 def db_insert_purchase_check(order_id: str, file_id: str):
     con = db_connect()
     cur = con.cursor()
@@ -496,7 +526,7 @@ def addr_prompt_text(kind: str) -> str:
         "або\n"
         "• вул. Київська 1, Обухів\n\n"
         "📍 Можна також натиснути «📍 Поділитись точкою» для точнішого розрахунку.\n"
-        "⚠️ У Telegram Desktop (ПК) геолокація може не працювати — тоді надішли лінк Google Maps або координати (lat, lon)."
+        "⚠️ У Telegram Desktop (ПК) кнопка геолокації може не відкриватися. Якщо так — надішли лінк Google Maps або координати (lat, lon). На телефоні кнопка працює."
     )
 
 
@@ -3361,6 +3391,7 @@ def build_app() -> Application:
 
     # after conv: manual km / support contact / rating text / check photo
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT & ~filters.COMMAND), final_km_input_handler), group=3)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT & ~filters.COMMAND), support_contact_handler), group=3)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.CONTACT, support_contact_handler), group=3)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT & ~filters.COMMAND), rating_text_handler), group=4)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.PHOTO, check_photo_handler), group=4)
