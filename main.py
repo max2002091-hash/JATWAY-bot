@@ -1330,44 +1330,41 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         # Показуємо детальну інформацію (останні 40)
-        lines = []
+        parts: List[str] = []
         for r in rows[:40]:
             try:
                 dt = datetime.fromisoformat(r["closed_at"])
                 dt_str = dt.astimezone(TZ).strftime("%d.%m.%Y %H:%M")
             except Exception:
-                dt_str = str(r["closed_at"])
+                dt_str = str(r.get("closed_at") or "-")
 
-            mode = "🛒 ВИКУП" if r["delivery_mode"] == "buy" else "📦 ГОТОВЕ"
-            courier = r["courier_name"] or str(r["courier_id"] or "-")
-            customer = r["customer_name"] or "-"
-            cuser = r["customer_username"] or "-"
+            mode = "🛒 ВИКУП" if r.get("delivery_mode") == "buy" else "📦 ГОТОВЕ"
+            courier = r.get("courier_name") or str(r.get("courier_id") or "-")
+            customer = r.get("customer_name") or "-"
+            cuser = r.get("customer_username") or "-"
 
-            lines.append(
-    f"🗓 {dt_str}\n"
-    f"№{r['order_id']} | {mode} | {r['delivery_key']}\n"
-    f"👤 Клієнт: {customer} (@{cuser})\n"
-    f"🚚 Кур’єр: {courier} (ID: {r['courier_id'] or '-'})\n"
-    f"📍 Звідки: {r['from_addr'] or '-'}\n"
-    f"🎯 Куди: {r['to_addr'] or '-'}\n"
-    f"💰 Сума: {r['total']} грн | 📈 Комісія: {r['fee']} грн\n"
-)
+            parts.append(
+                f"🗓 {dt_str}\n"
+                f"№{r.get('order_id')} | {mode} | {r.get('delivery_key','-')}\n"
+                f"👤 Клієнт: {customer} (@{cuser})\n"
+                f"🚚 Кур’єр: {courier} (ID: {r.get('courier_id') or '-'})\n"
+                f"📍 Звідки: {r.get('from_addr') or '-'}\n"
+                f"🎯 Куди: {r.get('to_addr') or '-'}\n"
+                f"💰 Сума: {r.get('total')} грн | 📈 Комісія: {r.get('fee')} грн\n"
+                f"--------------------------"
+            )
 
         # Telegram має ліміт на довжину повідомлення — шлемо частинами
-        header = "📚 **Закриті замовлення (останні)**
-
-"
+        header = "📚 **Закриті замовлення (останні)**\n\n"
         chunk = ""
-        for part in lines:
+        for part in parts:
             if len(header) + len(chunk) + len(part) + 2 > 3800:
                 await context.bot.send_message(OWNER_CHAT_ID, header + chunk, parse_mode="Markdown")
                 chunk = ""
-            chunk += part + "
-"
+            chunk += part + "\n"
         if chunk:
             await context.bot.send_message(OWNER_CHAT_ID, header + chunk, parse_mode="Markdown")
         return
-
     if data == "checks:list":
         rows = db_get_checks(30)
         if not rows:
@@ -1375,27 +1372,24 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         # 1) Пишемо список
-        lines = []
+        items: List[str] = []
         for r in rows[:30]:
             try:
                 dt = datetime.fromisoformat(r["created_at"])
                 dt_str = dt.astimezone(TZ).strftime("%d.%m.%Y %H:%M")
             except Exception:
-                dt_str = str(r["created_at"])
-            lines.append(f"• №{r['order_id']} | {dt_str}")
+                dt_str = str(r.get("created_at") or "-")
+            items.append(f"• №{r.get('order_id')} | {dt_str}")
 
         await context.bot.send_message(
             OWNER_CHAT_ID,
-            "🧾 **Останні чеки (викуп)**
-
-" + "
-".join(lines),
-            parse_mode="Markdown"
+            "🧾 **Останні чеки (викуп)**\n\n" + "\n".join(items),
+            parse_mode="Markdown",
         )
 
-        # 2) Додаємо фото чеків (останнi 10)
+        # 2) Додаємо фото чеків (останні 10)
         for r in rows[:10]:
-            file_id = r["file_id"]
+            file_id = r.get("file_id")
             if not file_id:
                 continue
             try:
@@ -1403,14 +1397,12 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     dt = datetime.fromisoformat(r["created_at"])
                     dt_str = dt.astimezone(TZ).strftime("%d.%m.%Y %H:%M")
                 except Exception:
-                    dt_str = str(r["created_at"])
+                    dt_str = str(r.get("created_at") or "-")
 
                 await context.bot.send_photo(
                     chat_id=OWNER_CHAT_ID,
                     photo=file_id,
-                    caption=f"🧾 Чек (викуп)
-№{r['order_id']}
-🗓 {dt_str}",
+                    caption=f"🧾 Чек (викуп)\n№{r.get('order_id')}\n🗓 {dt_str}",
                 )
             except Exception:
                 # якщо це не photo file_id (інколи може бути document) — пробуємо як документ
@@ -1418,11 +1410,11 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     await context.bot.send_document(
                         chat_id=OWNER_CHAT_ID,
                         document=file_id,
-                        caption=f"🧾 Чек (викуп)
-№{r['order_id']}"
+                        caption=f"🧾 Чек (викуп)\n№{r.get('order_id')}",
                     )
                 except Exception:
                     pass
+        return
         return
 
     if data == "owner:add":
