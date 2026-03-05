@@ -1344,22 +1344,14 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             cuser = r["customer_username"] or "-"
 
             lines.append(
-                f"🗓 {dt_str}
-"
-                f"№{r['order_id']} | {mode} | {r['delivery_key']}
-"
-                f"👤 Клієнт: {customer} (@{cuser})
-"
-                f"🚚 Кур’єр: {courier} (ID: {r['courier_id'] or '-'})
-"
-                f"📍 Звідки: {r['from_addr'] or '-'}
-"
-                f"🎯 Куди: {r['to_addr'] or '-'}
-"
-                f"💰 Сума: {r['total']} грн | 📈 Комісія: {r['fee']} грн
-"
-                f"--------------------------"
-            )
+    f"🗓 {dt_str}\n"
+    f"№{r['order_id']} | {mode} | {r['delivery_key']}\n"
+    f"👤 Клієнт: {customer} (@{cuser})\n"
+    f"🚚 Кур’єр: {courier} (ID: {r['courier_id'] or '-'})\n"
+    f"📍 Звідки: {r['from_addr'] or '-'}\n"
+    f"🎯 Куди: {r['to_addr'] or '-'}\n"
+    f"💰 Сума: {r['total']} грн | 📈 Комісія: {r['fee']} грн\n"
+)
 
         # Telegram має ліміт на довжину повідомлення — шлемо частинами
         header = "📚 **Закриті замовлення (останні)**
