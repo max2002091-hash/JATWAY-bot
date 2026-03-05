@@ -987,6 +987,42 @@ def dispatcher_chat_id() -> int:
     return COURIER_GROUP_ID or ADMIN_CHAT_ID
 
 
+def schedule_once(context: ContextTypes.DEFAULT_TYPE, callback, delay_sec: float, data: Optional[dict] = None, name: str = ""):
+    """Run a one-shot delayed task even when JobQueue is unavailable (e.g., PTB installed without job-queue extras).
+
+    - If JobQueue exists, uses job_queue.run_once.
+    - Otherwise falls back to asyncio.sleep + direct callback invocation with a minimal context-like object.
+    """
+    jq = getattr(context, "job_queue", None)
+    if jq:
+        try:
+            return jq.run_once(callback, when=delay_sec, data=data, name=(name or None))
+        except Exception:
+            # fallback to asyncio below
+            pass
+
+    async def _runner():
+        await asyncio.sleep(max(0.0, float(delay_sec)))
+
+        class _Job:
+            def __init__(self, d):
+                self.data = d
+
+        class _Ctx:
+            def __init__(self, application, bot, job):
+                self.application = application
+                self.bot = bot
+                self.job = job
+
+        try:
+            await callback(_Ctx(context.application, context.bot, _Job(data)))
+        except Exception:
+            pass
+
+    asyncio.create_task(_runner())
+    return None
+
+
 def courier_active_order_ids(courier_id: int) -> List[str]:
     ids = []
     for oid, o in ORDERS_DB.items():
@@ -2096,17 +2132,13 @@ async def buy_approx_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(pay_text, parse_mode="Markdown", reply_markup=kb_customer_paid(order_id))
 
     # timer: if not clicked "I paid" -> auto cancel
-    context.job_queue.run_once(
-        job_autocancel_if_not_clicked_paid,
-        when=15 * 60,
-        data={"customer_id": update.effective_user.id, "order_id": order_id},
-        name=f"autocancel:{order_id}"
-    )
+    schedule_once(context, job_autocancel_if_not_clicked_paid, delay_sec=15 * 60, data={"customer_id": update.effective_user.id, "order_id": order_id},
+        name=f"autocancel:{order_id}")
     # reminder 5 min before
     remind_sec = max(0, (15 - REMINDER_BEFORE_CANCEL_MIN) * 60)
-    context.job_queue.run_once(
+    schedule_once(context, 
         job_remind_before_autocancel,
-        when=remind_sec,
+        delay_sec=remind_sec,
         data={"customer_id": update.effective_user.id, "order_id": order_id},
         name=f"remind:{order_id}"
     )
