@@ -65,7 +65,7 @@ PORT = int(os.getenv("PORT", "8000"))
 # ===== Tariffs =====
 # =========================
 PRICE_SCHEDULED_BASE = 120     # ✅ було 110
-PRICE_URGENT_BASE = 170
+PRICE_URGENT_BASE = 120
 BASE_KM = 2
 EXTRA_KM_PRICE = 20            # ✅ було 23
 EXTRA_OUTSIDE_OBUKHIV_PER_KM = 8
@@ -573,6 +573,15 @@ def back_only_kb():
     return ReplyKeyboardMarkup([["⬅️ Назад в меню"]], resize_keyboard=True)
 
 
+def addr_input_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("📍 Поділитись точкою", request_location=True)],
+            ["⬅️ Назад в меню"],
+        ],
+        resize_keyboard=True
+    )
+
 def phone_kb():
     return ReplyKeyboardMarkup(
         [
@@ -831,18 +840,6 @@ def kb_contact_courier(order_id: str, courier_id: int, courier_username: str = "
     url = tg_user_url(courier_id, courier_username)
     return InlineKeyboardMarkup([[InlineKeyboardButton("📞 Написати кур’єру", url=url)]])
 
-def kb_contact_customer(order_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📞 Зв’язатись з клієнтом", callback_data=f"contact_customer:{order_id}")]
-    ])
-
-
-def kb_contact_courier(order_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📞 Зв’язатись з кур’єром", callback_data=f"contact_courier:{order_id}")]
-    ])
-
-
 def kb_close_after_manual(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Закрити замовлення", callback_data=f"close_manual:{order_id}")]
@@ -852,7 +849,7 @@ def kb_close_after_manual(order_id: str) -> InlineKeyboardMarkup:
 def finalize_kb(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Ціна вірна", callback_data=f"finish_auto:{order_id}")],
-        [InlineKeyboardButton("✏️ Ввести фінальний км (без +10%)", callback_data=f"finish_manual:{order_id}")]
+        [InlineKeyboardButton("✏️ Ввести фінальний км", callback_data=f"finish_manual:{order_id}")]
     ])
 
 
@@ -1504,15 +1501,22 @@ async def final_km_input_handler(update: Update, context: ContextTypes.DEFAULT_T
         fee_rate
     )
 
-    await finalize_and_close_order(context, order_id, total, fee, manual_dist=dist_real, closed_by="кур'єр (вручну)")
+        # НЕ закриваємо одразу. Зберігаємо ручну фіналізацію і даємо кнопку "Закрити замовлення"
+    order["manual_pending"] = True
+    order["manual_total"] = int(total)
+    order["manual_fee"] = int(fee)
+    order["manual_dist"] = float(dist_real)
+    order["status"] = "await_manual_close"
 
     await update.message.reply_text(
         f"✅ Замовлення №{order_id} фіналізовано.\n"
         f"📏 Фінальний км: {dist_real:.1f}\n"
         f"💰 До сплати: {total} грн\n"
-        f"📉 Комісія: {fee} грн",
-        reply_markup=courier_menu()
+        f"📉 Комісія: {fee} грн\n\n"
+        "Скажи клієнту нову суму. Після оплати натисни «✅ Закрити замовлення».",
+        reply_markup=kb_close_after_manual(order_id)
     )
+
 
 
 # =========================
@@ -1529,7 +1533,11 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     order_id = SUPPORT_CONTACT_PENDING.pop(courier_id, None)
-    phone = update.message.contact.phone_number if update.message.contact else "-"
+    phone = "-"
+    if update.message.contact and update.message.contact.phone_number:
+        phone = update.message.contact.phone_number
+    elif update.message.text:
+        phone = update.message.text.strip()
 
     u = update.effective_user
     msg = (
@@ -1564,10 +1572,23 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         return False
 
     uid = update.effective_user.id
-    if uid not in COURIERS:
-        return False
-
     text = update.message.text.strip()
+
+    # Якщо користувач НЕ кур'єр, але натиснув кнопку з кур'єрського меню —
+    # не кидаємо його в клієнтське меню "за замовчуванням".
+    if uid not in COURIERS:
+        courier_buttons = {
+            "📦 Мої активні",
+            "💳 Мій баланс",
+            "⭐ Мій рейтинг",
+            "🆔 Мій ID",
+            "🆘 Техпідтримка",
+            "⬅️ Клієнтське меню",
+        }
+        if text in courier_buttons:
+            await update.message.reply_text("❌ Ви не є кур’єром. Якщо треба — зверніться до адміна.", reply_markup=role_menu())
+            return True
+        return False
 
     if text == "🆔 Мій ID":
         await update.message.reply_text(f"🆔 Ваш ID кур’єра: `{uid}`", parse_mode="Markdown", reply_markup=courier_menu())
@@ -1787,7 +1808,7 @@ async def delivery_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WHEN_INPUT
 
-    await update.message.reply_text(addr_prompt_text("Звідки забрати?"), reply_markup=back_only_kb())
+    await update.message.reply_text(addr_prompt_text("Звідки забрати?"), reply_markup=addr_input_kb())
     return FROM_ADDR
 
 
@@ -1815,7 +1836,7 @@ async def when_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "✅ Підтвердити час":
         context.user_data["scheduled_when"] = context.user_data.get("when_temp", "")
-        await update.message.reply_text(addr_prompt_text("Звідки забрати?"), reply_markup=back_only_kb())
+        await update.message.reply_text(addr_prompt_text("Звідки забрати?"), reply_markup=addr_input_kb())
         return FROM_ADDR
 
     await update.message.reply_text("Обери кнопку 👇", reply_markup=when_confirm_kb())
@@ -1827,9 +1848,19 @@ async def from_addr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Повертаю в меню 👇", reply_markup=main_menu())
         return CHOICE
 
+    # Якщо клієнт поділився гео-точкою — зберігаємо її як додаткову інформацію
+    if update.message.location:
+        loc = update.message.location
+        context.user_data["from_coords_temp"] = (float(loc.latitude), float(loc.longitude))
+        await update.message.reply_text(
+            "✅ Точку (ЗВІДКИ) отримано. Тепер напиши адресу текстом у форматі нижче 👇",
+            reply_markup=addr_input_kb()
+        )
+        return FROM_ADDR
+
     addr = (update.message.text or "").strip()
     if not has_locality(addr):
-        await update.message.reply_text(locality_hint(), reply_markup=back_only_kb())
+        await update.message.reply_text(locality_hint(), reply_markup=addr_input_kb())
         return FROM_ADDR
 
     context.user_data["from_addr_temp"] = addr
@@ -1844,18 +1875,20 @@ async def confirm_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOICE
 
     if text == "✏️ Змінити адресу":
-        await update.message.reply_text(addr_prompt_text("Ок, введи адресу звідки ще раз:"), reply_markup=back_only_kb())
+        await update.message.reply_text(addr_prompt_text("Ок, введи адресу звідки ще раз:"), reply_markup=addr_input_kb())
         return FROM_ADDR
 
     if text == "✅ Підтвердити адресу":
         context.user_data["from_addr"] = context.user_data.get("from_addr_temp", "")
+        if context.user_data.get("from_coords_temp"):
+            context.user_data["from_coords"] = context.user_data.get("from_coords_temp")
 
         if context.user_data.get("edit_mode") == "from":
             context.user_data.pop("edit_mode", None)
             await show_preconfirm_summary(update, context)
             return CONFIRM_ORDER
 
-        await update.message.reply_text(addr_prompt_text("Куди доставити?"), reply_markup=back_only_kb())
+        await update.message.reply_text(addr_prompt_text("Куди доставити?"), reply_markup=addr_input_kb())
         return TO_ADDR
 
     await update.message.reply_text("Обери кнопку 👇", reply_markup=addr_confirm_kb())
@@ -1867,9 +1900,18 @@ async def to_addr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Повертаю в меню 👇", reply_markup=main_menu())
         return CHOICE
 
+    if update.message.location:
+        loc = update.message.location
+        context.user_data["to_coords_temp"] = (float(loc.latitude), float(loc.longitude))
+        await update.message.reply_text(
+            "✅ Точку (КУДИ) отримано. Тепер напиши адресу текстом у форматі нижче 👇",
+            reply_markup=addr_input_kb()
+        )
+        return TO_ADDR
+
     addr = (update.message.text or "").strip()
     if not has_locality(addr):
-        await update.message.reply_text(locality_hint(), reply_markup=back_only_kb())
+        await update.message.reply_text(locality_hint(), reply_markup=addr_input_kb())
         return TO_ADDR
 
     context.user_data["to_addr_temp"] = addr
@@ -1884,11 +1926,13 @@ async def confirm_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOICE
 
     if text == "✏️ Змінити адресу":
-        await update.message.reply_text(addr_prompt_text("Ок, введи адресу куди ще раз:"), reply_markup=back_only_kb())
+        await update.message.reply_text(addr_prompt_text("Ок, введи адресу куди ще раз:"), reply_markup=addr_input_kb())
         return TO_ADDR
 
     if text == "✅ Підтвердити адресу":
         context.user_data["to_addr"] = context.user_data.get("to_addr_temp", "")
+        if context.user_data.get("to_coords_temp"):
+            context.user_data["to_coords"] = context.user_data.get("to_coords_temp")
 
         if context.user_data.get("edit_mode") == "to":
             context.user_data.pop("edit_mode", None)
@@ -2048,8 +2092,14 @@ async def show_preconfirm_summary(update: Update, context: ContextTypes.DEFAULT_
 
     session: aiohttp.ClientSession = context.application.bot_data["http"]
 
-    from_coords = await geocode_address_google(from_addr_v, session)
-    to_coords = await geocode_address_google(to_addr_v, session)
+    from_coords = data.get("from_coords")
+    to_coords = data.get("to_coords")
+
+    # якщо клієнт не ділився точкою — геокодуємо адресу
+    if not from_coords:
+        from_coords = await geocode_address_google(from_addr_v, session)
+    if not to_coords:
+        to_coords = await geocode_address_google(to_addr_v, session)
     dist_km = get_distance_km(from_coords, to_coords)
 
     fee_rate = JETWAY_FEE_RATE_DEFAULT
@@ -2121,12 +2171,12 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "📍 Змінити звідки":
         context.user_data["edit_mode"] = "from"
-        await update.message.reply_text(addr_prompt_text("Ок, введи адресу звідки ще раз:"), reply_markup=back_only_kb())
+        await update.message.reply_text(addr_prompt_text("Ок, введи адресу звідки ще раз:"), reply_markup=addr_input_kb())
         return FROM_ADDR
 
     if text == "🎯 Змінити куди":
         context.user_data["edit_mode"] = "to"
-        await update.message.reply_text(addr_prompt_text("Ок, введи адресу куди ще раз:"), reply_markup=back_only_kb())
+        await update.message.reply_text(addr_prompt_text("Ок, введи адресу куди ще раз:"), reply_markup=addr_input_kb())
         return TO_ADDR
 
     if text == "💬 Змінити коментар":
@@ -2236,8 +2286,10 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🕒 Час: {when_line}\n"
             f"📍 Звідки: {from_addr_v}\n"
             f"🗺️ Лінк звідки: {fmt_link(from_coords)}\n"
+            f"📍 Гео (ЗВІДКИ): {fmt_link(from_coords)}\n"
             f"🎯 Куди: {to_addr_v}\n"
             f"🗺️ Лінк куди: {fmt_link(to_coords)}\n"
+            f"📍 Гео (КУДИ): {fmt_link(to_coords)}\n"
             f"🧾 Список: {ORDERS_DB[order_id]['buy_list']}\n"
             f"💰 Орієнт. сума покупок: {ORDERS_DB[order_id]['buy_approx_sum']} грн\n"
             f"🔒 Гарантія: {ORDERS_DB[order_id]['guarantee_amount']} грн\n"
@@ -2254,9 +2306,11 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📍 Звідки: {from_addr_v}\n"
             f"🧭 Коорд. звідки: {fmt_coords(from_coords)}\n"
             f"🗺️ Лінк звідки: {fmt_link(from_coords)}\n"
+            f"📍 Гео (ЗВІДКИ): {fmt_link(from_coords)}\n"
             f"🎯 Куди: {to_addr_v}\n"
             f"🧭 Коорд. куди: {fmt_coords(to_coords)}\n"
             f"🗺️ Лінк куди: {fmt_link(to_coords)}\n"
+            f"📍 Гео (КУДИ): {fmt_link(to_coords)}\n"
             f"📦 Що: {data.get('item','-')}\n"
             f"📞 Тел: {data.get('phone') or 'не вказано'}\n"
             f"💬 Коментар: {data.get('comment','-')}\n"
@@ -2448,6 +2502,11 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
+            # дозволяємо клієнту одним повідомленням надіслати деталі покупки після підтвердження гарантії
+            buy_pending = context.application.bot_data.get("buy_details_pending", {})
+            buy_pending[int(customer_id)] = str(order_id)
+            context.application.bot_data["buy_details_pending"] = buy_pending
+
         try:
             await query.edit_message_text(f"✅ Гарантію по №{order_id} підтверджено.")
         except Exception:
@@ -2469,6 +2528,11 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(st["customer_id"], f"❌ Оплату гарантії по №{order_id} не підтверджено. Замовлення скасовано.")
             except Exception:
                 pass
+
+            # дозволяємо клієнту одним повідомленням надіслати деталі покупки після підтвердження гарантії
+            buy_pending = context.application.bot_data.get("buy_details_pending", {})
+            buy_pending[int(customer_id)] = str(order_id)
+            context.application.bot_data["buy_details_pending"] = buy_pending
 
         try:
             await query.edit_message_text(f"❌ Відхилено. №{order_id} скасовано.")
@@ -2977,7 +3041,7 @@ def build_app() -> Application:
 
             BUY_LIST: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_list)],
             BUY_APPROX_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_approx_sum)],
-            BUY_WAIT_PAID_CLICK: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_wait_paid_noop)],
+            BUY_WAIT_PAID_CLICK: [MessageHandler(filters.TEXT & ~filters.COMMAND, choice_router)],
 
             ITEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, item)],
 
@@ -3043,5 +3107,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# === PART 2/2 END ===
