@@ -1734,6 +1734,34 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
     return False
 
 
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point /start for both clients and owner."""
+    try:
+        context.user_data.clear()
+    except Exception:
+        pass
+
+    if not update.message:
+        return ConversationHandler.END
+
+    # Owner menu
+    if is_owner_chat(update):
+        await update.message.reply_text("Меню овнера 👇", reply_markup=owner_quick_kb())
+        await update.message.reply_text("Обери роль для тесту або натисни /panel", reply_markup=role_menu())
+        return ROLE_CHOICE
+
+    # Private users (clients/couriers)
+    if is_private_chat(update):
+        await update.message.reply_text(
+            f"ℹ️ Доставки працюють {WORK_HOURS_START}–{WORK_HOURS_END}. 🌙 Нічні замовлення не приймаються"
+        )
+        await update.message.reply_text("Привіт! Хто ти? Обери 👇", reply_markup=role_menu())
+        return ROLE_CHOICE
+
+    return ConversationHandler.END
+
+
 async def role_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
 
