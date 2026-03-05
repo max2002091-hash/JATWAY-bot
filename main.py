@@ -406,6 +406,19 @@ def db_get_checks(limit: int = 20) -> List[sqlite3.Row]:
     return rows
 
 
+def db_get_closed_orders(limit: int = 30) -> List[sqlite3.Row]:
+    con = db_connect()
+    cur = con.cursor()
+    rows = cur.execute(
+        "SELECT order_id, closed_at, delivery_mode, delivery_key, total, fee, courier_id, courier_name, customer_name "
+        "FROM orders_closed ORDER BY closed_at DESC LIMIT ?",
+        (int(limit),),
+    ).fetchall()
+    con.close()
+    return rows
+
+
+
 def _parse_hhmm(s: str) -> Tuple[int, int]:
     m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", s or "")
     if not m:
@@ -616,6 +629,7 @@ def owner_panel_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 Статистика: тиждень", callback_data="stats:week")],
         [InlineKeyboardButton("📊 Статистика: місяць", callback_data="stats:month")],
         [InlineKeyboardButton("📤 Експорт CSV за місяць", callback_data="export:month")],
+        [InlineKeyboardButton("📚 Закриті замовлення", callback_data="closed:list")],
         [InlineKeyboardButton("⭐ Рейтинги кур’єрів", callback_data="ratings:list")],
         [InlineKeyboardButton("🧾 Архів чеків (викуп)", callback_data="checks:list")],
         [
@@ -742,7 +756,7 @@ def calculate_finance_auto(from_addr: str, to_addr: str, dist_km: float, is_urge
     base = PRICE_URGENT_BASE if is_urgent else PRICE_SCHEDULED_BASE
 
     km_price = EXTRA_KM_PRICE + (EXTRA_OUTSIDE_OBUKHIV_PER_KM if outside else 0)
-    extra_km = math.ceil(max(0.0, safe_dist - BASE_KM))
+    extra_km = max(0.0, safe_dist - BASE_KM)
     total = base + (extra_km * km_price)
 
     fee = total * fee_rate
@@ -755,7 +769,7 @@ def calculate_finance_final(from_addr: str, to_addr: str, dist_km_real: float, i
     base = PRICE_URGENT_BASE if is_urgent else PRICE_SCHEDULED_BASE
     km_price = EXTRA_KM_PRICE + (EXTRA_OUTSIDE_OBUKHIV_PER_KM if outside else 0)
 
-    extra_km = math.ceil(max(0.0, dist_km_real - BASE_KM))
+    extra_km = max(0.0, dist_km_real - BASE_KM)
     total = base + (extra_km * km_price)
 
     fee = total * fee_rate
@@ -799,6 +813,23 @@ def tme_url(username: str) -> Optional[str]:
         return None
     return f"https://t.me/{u}"
 
+def tg_user_url(user_id: int, username: str = "") -> str:
+    # Якщо є username — відкриваємо через https://t.me/username
+    # Інакше пробуємо deep-link tg://user?id=... (працює у більшості клієнтів, особливо на мобільних)
+    u = (username or "").lstrip("@").strip()
+    if u:
+        return f"https://t.me/{u}"
+    return f"tg://user?id={int(user_id)}"
+
+
+def kb_contact_customer(order_id: str, customer_id: int, customer_username: str = "") -> InlineKeyboardMarkup:
+    url = tg_user_url(customer_id, customer_username)
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📞 Написати клієнту", url=url)]])
+
+
+def kb_contact_courier(order_id: str, courier_id: int, courier_username: str = "") -> InlineKeyboardMarkup:
+    url = tg_user_url(courier_id, courier_username)
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📞 Написати кур’єру", url=url)]])
 
 def kb_contact_customer(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -820,7 +851,7 @@ def kb_close_after_manual(order_id: str) -> InlineKeyboardMarkup:
 
 def finalize_kb(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Ціна вірна (авто)", callback_data=f"finish_auto:{order_id}")],
+        [InlineKeyboardButton("✅ Ціна вірна", callback_data=f"finish_auto:{order_id}")],
         [InlineKeyboardButton("✏️ Ввести фінальний км (без +10%)", callback_data=f"finish_manual:{order_id}")]
     ])
 
@@ -1194,6 +1225,31 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
+    
+    if data == "closed:list":
+        rows = db_get_closed_orders(40)
+        if not rows:
+            await context.bot.send_message(OWNER_CHAT_ID, "📚 Закритих замовлень ще немає.")
+            return
+        lines = []
+        for r in rows[:40]:
+            # closed_at already iso; show date+time
+            try:
+                dt = datetime.fromisoformat(r["closed_at"])
+                dt_str = dt.astimezone(TZ).strftime("%d.%m.%Y %H:%M")
+            except Exception:
+                dt_str = str(r["closed_at"])
+            mode = "🛒 ВИКУП" if r["delivery_mode"] == "buy" else "📦 ГОТОВЕ"
+            lines.append(
+                f"• {dt_str} | №{r['order_id']} | {mode} | {r['total']} грн | fee {r['fee']} грн | кур’єр: {r['courier_name'] or r['courier_id']}"
+            )
+        await context.bot.send_message(
+            OWNER_CHAT_ID,
+            "📚 **Закриті замовлення (останні)**\n\n" + "\n".join(lines),
+            parse_mode="Markdown"
+        )
+        return
+
     if data == "checks:list":
         rows = db_get_checks(30)
         if not rows:
@@ -1485,12 +1541,15 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
     )
 
     if OWNER_CHAT_ID:
-        await context.bot.send_message(
-            OWNER_CHAT_ID,
+        try:
+            await context.bot.send_message(
+                OWNER_CHAT_ID,
             msg,
             parse_mode="Markdown",
             reply_markup=kb_owner_force_close(order_id)
-        )
+            )
+        except Exception:
+            pass
 
     await update.message.reply_text("✅ Запит надіслано адміну. Очікуй дзвінок.", reply_markup=courier_menu())
 
@@ -1509,6 +1568,11 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         return False
 
     text = update.message.text.strip()
+
+    if text == "🆔 Мій ID":
+        await update.message.reply_text(f"🆔 Ваш ID кур’єра: `{uid}`", parse_mode="Markdown", reply_markup=courier_menu())
+        return True
+
 
     if text == "💳 Мій баланс":
         bal = db_get_balance(uid)
@@ -1609,6 +1673,23 @@ async def choice_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (update.message.text or "").strip()
 
+    # ✅ ВИКУП: після підтвердження гарантії овнером клієнт надсилає деталі покупки (1 повідомлення)
+    buy_pending = context.application.bot_data.get("buy_details_pending", {})
+    uid = update.effective_user.id
+    if uid in buy_pending:
+        order_id = buy_pending.pop(uid)
+        context.application.bot_data["buy_details_pending"] = buy_pending
+    
+        # зберігаємо деталі та показуємо підсумок + кнопку підтвердження
+        context.user_data["buy_details"] = text or "-"
+        # важливо: переконаємось, що order_id той самий
+        context.user_data["pending_order_id"] = order_id
+    
+        await update.message.reply_text("✅ Деталі покупки збережено.")
+        await show_preconfirm_summary(update, context)
+        return CONFIRM_ORDER
+    
+    
     if text == "🚚 Доставка":
         # work hours only for clients
         if (not is_owner_chat(update)) and is_private_chat(update):
@@ -2196,16 +2277,19 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ORDERS_DB[order_id]["admin_msg_id"] = sent.message_id
 
     if OWNER_CHAT_ID:
-        await context.bot.send_message(
-            chat_id=OWNER_CHAT_ID,
-            text=(
-                f"📥 Нове замовлення №{order_id}\n"
-                f"Тип: {'🛒 ВИКУП' if delivery_mode_v=='buy' else '📦 ГОТОВЕ'}\n"
-                f"Клієнт: {user.full_name} (@{user.username or '-'})\n"
-                f"Сума (авто): {total} грн | Комісія: {fee} грн"
-            ),
-            reply_markup=kb_owner_force_close(order_id)
-        )
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_CHAT_ID,
+                text=(
+                    f"📥 Нове замовлення №{order_id}\n"
+                    f"Тип: {'🛒 ВИКУП' if delivery_mode_v=='buy' else '📦 ГОТОВЕ'}\n"
+                    f"Клієнт: {user.full_name} (@{user.username or '-'})\n"
+                    f"Сума (авто): {total} грн | Комісія: {fee} грн"
+                ),
+                reply_markup=kb_owner_force_close(order_id)
+            )
+        except Exception:
+            pass
 
     await update.message.reply_text(
         "✅ Ваше замовлення відправлено кур’єрам. Очікуйте підтвердження.",
@@ -2261,15 +2345,20 @@ async def rating_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     avg_all, cnt_all = db_get_courier_rating(int(courier_id), None)
     if OWNER_CHAT_ID:
-        await context.bot.send_message(
-            OWNER_CHAT_ID,
-            f"⭐ Новий відгук\n"
-            f"Замовлення №{order_id}\n"
-            f"Кур’єр: `{courier_id}`\n"
-            f"Оцінка: {txt}\n"
-            f"Рейтинг кур’єра (all): {avg_all:.2f} ({cnt_all})",
-            parse_mode="Markdown"
-        )
+        try:
+            await context.bot.send_message(
+                OWNER_CHAT_ID,
+                text=(
+                    "⭐ Новий відгук\n"
+                    f"Замовлення №{order_id}\n"
+                    f"Кур’єр: `{courier_id}`\n"
+                    f"Оцінка: {txt}\n"
+                    f"Рейтинг кур’єра (all): {avg_all:.2f} ({cnt_all})"
+                ),
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
     await update.message.reply_text("✅ Дякуємо за оцінку!")
 
 
@@ -2505,6 +2594,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order["courier_id"] = courier_id
         order["courier_name"] = query.from_user.full_name
         order["courier_username"] = query.from_user.username or "-"
+        order["courier_username"] = query.from_user.username or "-"
         order["status"] = "accepted"
 
         ACTIVE_ORDERS_COUNT[courier_id] = ACTIVE_ORDERS_COUNT.get(courier_id, 0) + 1
@@ -2547,27 +2637,20 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=info,
                 reply_markup=kb
             )
-            await context.bot.send_message(
-                chat_id=courier_id,
-                text=f"📞 Контакти по замовленню №{order_id}",
-                reply_markup=kb_contact_customer(order_id)
-            )
+
+            # ✅ окремим повідомленням даємо кнопку "Написати клієнту"
+            try:
+                await context.bot.send_message(
+                    chat_id=courier_id,
+                    text="📞 Зв’язок з клієнтом:",
+                    reply_markup=kb_contact_customer(order_id, int(order.get("customer_id") or 0), str(order.get("customer_username") or "-"))
+                )
+            except Exception:
+                pass
+    
+    
         except Exception:
             pass
-
-        # notify customer + contact button
-        customer_id = order.get("customer_id")
-        if customer_id:
-            cu = order.get("courier_username") or "-"
-            cu_url = tme_url(cu)
-            contact_lines = [f"🚚 Кур’єр призначений: {order.get('courier_name','-')} (@{cu})"]
-            if cu_url:
-                contact_lines.append(f"🔗 Telegram: {cu_url}")
-            await context.bot.send_message(
-                chat_id=customer_id,
-                text=("✅ Кур’єр взяв ваше замовлення №{oid}\n".format(oid=order_id) + "\n".join(contact_lines) + "\n\nНатисніть кнопку нижче, щоб отримати контакти 👇"),
-                reply_markup=kb_contact_courier(order_id)
-            )
 
         return
 
@@ -2692,7 +2775,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         final_total = int(order.get("total") or 0)
         final_fee = int(order.get("fee") or 0)
 
-        await finalize_and_close_order(context, order_id, final_total, final_fee, manual_dist=None, closed_by="кур'єр (авто)")
+        await finalize_and_close_order(context, order_id, final_total, final_fee, manual_dist=None, closed_by="кур'єр")
         try:
             await query.edit_message_text(f"✅ №{order_id} закрито по авто-розрахунку.\nКомісія: {final_fee} грн")
         except Exception:
@@ -2816,6 +2899,7 @@ async def post_init(app: Application):
     app.bot_data.setdefault("guarantee_pending", {})
     app.bot_data.setdefault("rating_pending", {})
     app.bot_data.setdefault("check_pending", {})
+    app.bot_data.setdefault("buy_details_pending", {})
 
     if OWNER_CHAT_ID:
         try:
@@ -2961,4 +3045,3 @@ if __name__ == "__main__":
     main()
 
 # === PART 2/2 END ===
-
