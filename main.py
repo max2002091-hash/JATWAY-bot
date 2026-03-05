@@ -492,7 +492,9 @@ def addr_prompt_text(kind: str) -> str:
         "• м. Обухів, вул. Київська 1\n"
         "• с. Германівка, вул. Шевченка 5\n"
         "або\n"
-        "• вул. Київська 1, Обухів\n"
+        "• вул. Київська 1, Обухів\n\n"
+        "📍 Можна також натиснути «📍 Поділитись точкою» для точнішого розрахунку.\n"
+        "⚠️ У Telegram Desktop (ПК) геолокація може не працювати — тоді надішли лінк Google Maps або координати (lat, lon)."
     )
 
 
@@ -546,6 +548,16 @@ def courier_menu():
         resize_keyboard=True
     )
 
+
+
+def customer_active_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            ["📞 Зв’язатись з кур’єром", "🆘 Техпідтримка (замовлення)"],
+            ["⬅️ Головне меню"],
+        ],
+        resize_keyboard=True
+    )
 
 def owner_quick_kb():
     return ReplyKeyboardMarkup([["/panel"]], resize_keyboard=True)
@@ -795,6 +807,16 @@ def kb_accept(order_id: str) -> InlineKeyboardMarkup:
     ])
 
 
+
+def kb_courier_active_list(order_ids: List[str]) -> InlineKeyboardMarkup:
+    rows = []
+    for oid in order_ids[:10]:
+        rows.append([InlineKeyboardButton(f"📦 №{oid}", callback_data=f"courier_open:{oid}")])
+    if not rows:
+        rows = [[InlineKeyboardButton("—", callback_data="noop")]]
+    return InlineKeyboardMarkup(rows)
+
+
 def kb_courier_controls_pickup(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Доставлено", callback_data=f"delivered:{order_id}")],
@@ -823,22 +845,27 @@ def tme_url(username: str) -> Optional[str]:
     return f"https://t.me/{u}"
 
 def tg_user_url(user_id: int, username: str = "") -> str:
-    # Якщо є username — відкриваємо через https://t.me/username
-    # Інакше пробуємо deep-link tg://user?id=... (працює у більшості клієнтів, особливо на мобільних)
+    # Вимога: відкривати контакт через t.me/username
     u = (username or "").lstrip("@").strip()
-    if u:
+    if u and u != "-":
         return f"https://t.me/{u}"
-    return f"tg://user?id={int(user_id)}"
+    return ""
 
 
-def kb_contact_customer(order_id: str, customer_id: int, customer_username: str = "") -> InlineKeyboardMarkup:
+
+def kb_contact_customer(order_id: str, customer_id: int, customer_username: str = "") -> Optional[InlineKeyboardMarkup]:
     url = tg_user_url(customer_id, customer_username)
+    if not url:
+        return None
     return InlineKeyboardMarkup([[InlineKeyboardButton("📞 Написати клієнту", url=url)]])
 
 
-def kb_contact_courier(order_id: str, courier_id: int, courier_username: str = "") -> InlineKeyboardMarkup:
+def kb_contact_courier(order_id: str, courier_id: int, courier_username: str = "") -> Optional[InlineKeyboardMarkup]:
     url = tg_user_url(courier_id, courier_username)
+    if not url:
+        return None
     return InlineKeyboardMarkup([[InlineKeyboardButton("📞 Написати кур’єру", url=url)]])
+
 
 def kb_close_after_manual(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -920,6 +947,41 @@ def fmt_link(coords: Optional[Tuple[float, float]]) -> str:
         return "-"
     return gmaps_link_from_coords(coords[0], coords[1])
 
+
+def extract_coords_from_text(text: str) -> Optional[Tuple[float, float]]:
+    """Extract coordinates from plain 'lat, lon' or Google Maps links."""
+    t = (text or "").strip()
+    if not t:
+        return None
+
+    # plain coords: 50.123, 30.456
+    m = re.search(r"(-?\d{1,2}\.\d{3,})\s*,\s*(-?\d{1,3}\.\d{3,})", t)
+    if m:
+        try:
+            lat = float(m.group(1))
+            lon = float(m.group(2))
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                return (lat, lon)
+        except Exception:
+            pass
+
+    # Google Maps variants
+    # ...maps?q=lat,lon  OR  ...maps/@lat,lon,zoom
+    m = re.search(r"[?&]q=(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)", t)
+    if m:
+        try:
+            return (float(m.group(1)), float(m.group(2)))
+        except Exception:
+            pass
+
+    m = re.search(r"/@(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)", t)
+    if m:
+        try:
+            return (float(m.group(1)), float(m.group(2)))
+        except Exception:
+            pass
+
+    return None
 
 def dispatcher_chat_id() -> int:
     return COURIER_GROUP_ID or ADMIN_CHAT_ID
@@ -1533,6 +1595,7 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     order_id = SUPPORT_CONTACT_PENDING.pop(courier_id, None)
+
     phone = "-"
     if update.message.contact and update.message.contact.phone_number:
         phone = update.message.contact.phone_number
@@ -1550,16 +1613,19 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
 
     if OWNER_CHAT_ID:
         try:
+            rm = kb_owner_force_close(order_id) if order_id else None
             await context.bot.send_message(
-                OWNER_CHAT_ID,
-            msg,
-            parse_mode="Markdown",
-            reply_markup=kb_owner_force_close(order_id)
+                chat_id=OWNER_CHAT_ID,
+                text=msg,
+                parse_mode="Markdown",
+                reply_markup=rm,
             )
         except Exception:
-            pass
+            await update.message.reply_text("❌ Не вдалося надіслати запит адміну. Перевір OWNER_CHAT_ID/доступ бота.", reply_markup=courier_menu())
+            return
 
     await update.message.reply_text("✅ Запит надіслано адміну. Очікуй дзвінок.", reply_markup=courier_menu())
+
 
 
 # =========================
@@ -1586,14 +1652,14 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
             "⬅️ Клієнтське меню",
         }
         if text in courier_buttons:
-            await update.message.reply_text("❌ Ви не є кур’єром. Якщо треба — зверніться до адміна.", reply_markup=role_menu())
+            await update.message.reply_text("❌ Ви не є кур’єром. Якщо треба — зверніться до адміністратора.")
             return True
         return False
 
+    # ✅ Кур'єрські дії
     if text == "🆔 Мій ID":
-        await update.message.reply_text(f"🆔 Ваш ID кур’єра: `{uid}`", parse_mode="Markdown", reply_markup=courier_menu())
+        await update.message.reply_text(f"🆔 Ваш ID: `{uid}`", parse_mode="Markdown", reply_markup=courier_menu())
         return True
-
 
     if text == "💳 Мій баланс":
         bal = db_get_balance(uid)
@@ -1601,41 +1667,28 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         return True
 
     if text == "⭐ Мій рейтинг":
-        ym = _month_key()
-        avg_all, cnt_all = db_get_courier_rating(uid, None)
-        avg_m, cnt_m = db_get_courier_rating(uid, ym)
-        next_rate = db_calc_next_month_commission(uid)
-        msg = (
-            f"⭐ **Ваш рейтинг**\n\n"
-            f"За весь час: {avg_all:.2f} (відгуків: {cnt_all})\n"
-            f"За {ym}: {avg_m:.2f} (відгуків: {cnt_m})\n\n"
-            "🎁 **Бонус комісії:**\n"
-            "Якщо за місяць рейтинг не нижче **4.80** і є мінімум **5 оцінок**, "
-            f"то комісія наступного місяця буде **20%**.\n"
-            "Якщо менше 5 оцінок — комісія залишається 25%."
-        )
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=courier_menu())
-        return True
-
-    if text == "📦 Мої активні":
-        ids = courier_active_order_ids(uid)
-        if not ids:
-            await update.message.reply_text("📦 Активних замовлень немає.", reply_markup=courier_menu())
-            return True
-
-        lines = []
-        for oid in ids[:10]:
-            o = ORDERS_DB.get(oid, {})
-            lines.append(f"• №{oid} — {o.get('status','-')}\n  {o.get('from_addr','-')} → {o.get('to_addr','-')}")
-        await update.message.reply_text("📦 Ваші активні замовлення:\n\n" + "\n\n".join(lines), reply_markup=courier_menu())
+        await show_my_rating(update, context, uid)
         return True
 
     if text == "🆘 Техпідтримка":
-        ids = courier_active_order_ids(uid)
-        if not ids:
-            await update.message.reply_text("🆘 Немає активних замовлень для запиту підтримки.", reply_markup=courier_menu())
+        # загальна техпідтримка з кур'єр меню (не по конкретному замовленню)
+        SUPPORT_CONTACT_PENDING[uid] = None
+        await update.message.reply_text(
+            "🆘 Надішліть номер телефону кнопкою нижче або текстом — адміну прийде ваш контакт.",
+            reply_markup=support_share_contact_kb()
+        )
+        return True
+
+    if text == "📦 Мої активні":
+        active_ids = [str(oid) for oid, o in ORDERS_DB.items()
+                      if o.get("courier_id") == uid and (o.get("status") in ("accepted", "delivered_wait_done") or o.get("manual_pending"))]
+
+        if not active_ids:
+            await update.message.reply_text("📭 У вас немає активних замовлень.", reply_markup=courier_menu())
             return True
-        await update.message.reply_text("🆘 Оберіть замовлення, по якому потрібна допомога:", reply_markup=kb_support_pick(ids))
+
+        await update.message.reply_text("Оберіть активне замовлення 👇", reply_markup=courier_menu())
+        await update.message.reply_text("👇 Список активних:", reply_markup=kb_courier_active_list(active_ids))
         return True
 
     if text == "⬅️ Клієнтське меню":
@@ -1643,29 +1696,6 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         return True
 
     return False
-
-
-# =========================
-# ===== Customer flow =====
-# =========================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-
-    # owner — постійно працює
-    if is_owner_chat(update):
-        await update.message.reply_text("Меню овнера 👇", reply_markup=owner_quick_kb())
-        await update.message.reply_text("Обери роль для тесту або натисни /panel", reply_markup=role_menu())
-        return ROLE_CHOICE
-
-    if is_private_chat(update):
-        # робочі години — інфо після старту
-        await update.message.reply_text(
-            f"ℹ️ Доставки працюють {WORK_HOURS_START}–{WORK_HOURS_END}. 🌙 Нічні замовлення не приймаються",
-        )
-        await update.message.reply_text("Привіт! Хто ти? Обери 👇", reply_markup=role_menu())
-        return ROLE_CHOICE
-
-    return ConversationHandler.END
 
 
 async def role_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1693,6 +1723,57 @@ async def choice_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOICE
 
     text = (update.message.text or "").strip()
+
+    # ✅ Якщо у клієнта є активне замовлення — показуємо спеціальне меню
+    uid = update.effective_user.id
+    active_map = context.application.bot_data.get("customer_active_orders", {})
+    active_order_id = active_map.get(int(uid))
+    if active_order_id:
+        if text == "⬅️ Головне меню":
+            await update.message.reply_text("Головне меню 👇", reply_markup=main_menu())
+            return CHOICE
+
+        if text == "📞 Зв’язатись з кур’єром":
+            order = ORDERS_DB.get(str(active_order_id))
+            if not order:
+                await update.message.reply_text("ℹ️ Активне замовлення не знайдено.", reply_markup=main_menu())
+                active_map.pop(int(uid), None)
+                context.application.bot_data["customer_active_orders"] = active_map
+                return CHOICE
+
+            cu = (order.get("courier_username") or "-").lstrip("@")
+            url = tme_url(cu)
+            if not url:
+                await update.message.reply_text(
+                    "ℹ️ У кур’єра немає username в Telegram. Попросіть кур’єра написати вам першим або зверніться в техпідтримку.",
+                    reply_markup=customer_active_menu()
+                )
+                return CHOICE
+
+            await update.message.reply_text(
+                "📞 Натисніть кнопку нижче, щоб відкрити чат з кур’єром 👇",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📞 Написати кур’єру", url=url)]])
+            )
+            return CHOICE
+
+        if text == "🆘 Техпідтримка (замовлення)":
+            order = ORDERS_DB.get(str(active_order_id))
+            u = update.effective_user
+            msg = (
+                "🆘 **Техпідтримка (клієнт)**\n\n"
+                f"Замовлення: №{active_order_id}\n"
+                f"Клієнт: {u.full_name} (@{u.username or '-'})\n"
+                f"ID: `{u.id}`\n"
+                f"Телефон: {order.get('phone','-') if order else '-'}\n"
+            )
+            if OWNER_CHAT_ID:
+                try:
+                    await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown")
+                except Exception:
+                    pass
+            await update.message.reply_text("✅ Запит відправлено в техпідтримку. Очікуйте відповідь.", reply_markup=customer_active_menu())
+            return CHOICE
+
 
     # ✅ ВИКУП: після підтвердження гарантії овнером клієнт надсилає деталі покупки (1 повідомлення)
     buy_pending = context.application.bot_data.get("buy_details_pending", {})
@@ -1844,12 +1925,12 @@ async def when_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def from_addr(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text and update.message.text.strip() == "⬅️ Назад в меню":
+    if update.message and update.message.text and update.message.text.strip() == "⬅️ Назад в меню":
         await update.message.reply_text("Повертаю в меню 👇", reply_markup=main_menu())
         return CHOICE
 
-    # Якщо клієнт поділився гео-точкою — зберігаємо її як додаткову інформацію
-    if update.message.location:
+    # ✅ Гео-точка з телефону
+    if update.message and update.message.location:
         loc = update.message.location
         context.user_data["from_coords_temp"] = (float(loc.latitude), float(loc.longitude))
         await update.message.reply_text(
@@ -1858,7 +1939,19 @@ async def from_addr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return FROM_ADDR
 
-    addr = (update.message.text or "").strip()
+    addr = ((update.message.text or "") if update.message else "").strip()
+
+    # ✅ Альтернатива для Telegram Desktop: координати або лінк Google Maps
+    coords = extract_coords_from_text(addr)
+    if coords:
+        context.user_data["from_coords_temp"] = coords
+        if not has_locality(addr):
+            await update.message.reply_text(
+                "✅ Точку (ЗВІДКИ) отримано з посилання/координат. Тепер напиши адресу текстом у форматі нижче 👇",
+                reply_markup=addr_input_kb()
+            )
+            return FROM_ADDR
+
     if not has_locality(addr):
         await update.message.reply_text(locality_hint(), reply_markup=addr_input_kb())
         return FROM_ADDR
@@ -1896,11 +1989,12 @@ async def confirm_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def to_addr(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text and update.message.text.strip() == "⬅️ Назад в меню":
+    if update.message and update.message.text and update.message.text.strip() == "⬅️ Назад в меню":
         await update.message.reply_text("Повертаю в меню 👇", reply_markup=main_menu())
         return CHOICE
 
-    if update.message.location:
+    # ✅ Гео-точка з телефону
+    if update.message and update.message.location:
         loc = update.message.location
         context.user_data["to_coords_temp"] = (float(loc.latitude), float(loc.longitude))
         await update.message.reply_text(
@@ -1909,7 +2003,19 @@ async def to_addr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return TO_ADDR
 
-    addr = (update.message.text or "").strip()
+    addr = ((update.message.text or "") if update.message else "").strip()
+
+    # ✅ Альтернатива для Telegram Desktop: координати або лінк Google Maps
+    coords = extract_coords_from_text(addr)
+    if coords:
+        context.user_data["to_coords_temp"] = coords
+        if not has_locality(addr):
+            await update.message.reply_text(
+                "✅ Точку (КУДИ) отримано з посилання/координат. Тепер напиши адресу текстом у форматі нижче 👇",
+                reply_markup=addr_input_kb()
+            )
+            return TO_ADDR
+
     if not has_locality(addr):
         await update.message.reply_text(locality_hint(), reply_markup=addr_input_kb())
         return TO_ADDR
@@ -2626,6 +2732,53 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
+
+    # open order from courier menu
+    if data.startswith("courier_open:"):
+        await query.answer()
+        order_id = data.split(":", 1)[1]
+        order = ORDERS_DB.get(order_id)
+        if not order:
+            return await query.answer("Замовлення не знайдено.", show_alert=True)
+
+        courier_id = query.from_user.id
+        if courier_id != order.get("courier_id"):
+            return await query.answer("❌ Це не ваше замовлення.", show_alert=True)
+
+        # show order info + controls
+        if order.get("delivery_mode") == "buy":
+            kb = kb_courier_controls_buy(order_id)
+            info = (
+                f"📦 **Активне замовлення №{order_id}**\n"
+                f"🟡 ВИКУП • ПОТРІБЕН ЧЕК\n"
+                f"🕒 Час: {order.get('scheduled_when','-')}\n"
+                f"📍 Звідки: {order.get('from_addr','-')}\n"
+                f"🎯 Куди: {order.get('to_addr','-')}\n"
+                f"🧾 Список: {order.get('buy_list','-')}\n"
+                f"🔒 Гарантія: {order.get('guarantee_amount','-')} грн\n"
+                f"📞 Телефон клієнта: {order.get('phone','-')}\n"
+            )
+        else:
+            kb = kb_courier_controls_pickup(order_id)
+            info = (
+                f"📦 **Активне замовлення №{order_id}**\n"
+                f"🕒 Час: {order.get('scheduled_when','-')}\n"
+                f"📍 Звідки: {order.get('from_addr','-')}\n"
+                f"🎯 Куди: {order.get('to_addr','-')}\n"
+                f"📦 Що: {order.get('item','-')}\n"
+                f"📞 Телефон клієнта: {order.get('phone','-')}\n"
+            )
+
+        await context.bot.send_message(chat_id=courier_id, text=info, parse_mode="Markdown", reply_markup=kb)
+
+        # contact button (через t.me/username)
+        kb_contact = kb_contact_customer(order_id, int(order.get("customer_id") or 0), str(order.get("customer_username") or "-"))
+        if kb_contact:
+            await context.bot.send_message(chat_id=courier_id, text="📞 Зв’язок з клієнтом:", reply_markup=kb_contact)
+        else:
+            await context.bot.send_message(chat_id=courier_id, text="📞 Зв’язок з клієнтом: у клієнта немає username в Telegram.")
+        return
+
     # accept
     if data.startswith("accept:"):
         await query.answer()
@@ -2660,6 +2813,12 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order["courier_username"] = query.from_user.username or "-"
         order["courier_username"] = query.from_user.username or "-"
         order["status"] = "accepted"
+
+        # ✅ позначаємо активне замовлення у клієнта (щоб показати меню зв'язку/підтримки)
+        ca = context.application.bot_data.get("customer_active_orders", {})
+        ca[int(order.get("customer_id") or 0)] = str(order_id)
+        context.application.bot_data["customer_active_orders"] = ca
+
 
         ACTIVE_ORDERS_COUNT[courier_id] = ACTIVE_ORDERS_COUNT.get(courier_id, 0) + 1
 
@@ -2704,17 +2863,40 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # ✅ окремим повідомленням даємо кнопку "Написати клієнту"
             try:
-                await context.bot.send_message(
-                    chat_id=courier_id,
-                    text="📞 Зв’язок з клієнтом:",
-                    reply_markup=kb_contact_customer(order_id, int(order.get("customer_id") or 0), str(order.get("customer_username") or "-"))
-                )
+                kb_contact = kb_contact_customer(order_id, int(order.get("customer_id") or 0), str(order.get("customer_username") or "-"))
+                if kb_contact:
+                    await context.bot.send_message(
+                        chat_id=courier_id,
+                        text="📞 Зв’язок з клієнтом:",
+                        reply_markup=kb_contact
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=courier_id,
+                        text="📞 Зв’язок з клієнтом: у клієнта немає username в Telegram.",
+                    )
             except Exception:
                 pass
     
     
         except Exception:
             pass
+
+
+        # ✅ повідомляємо клієнта, що кур'єр взяв замовлення, і показуємо меню клієнта
+        customer_id = int(order.get("customer_id") or 0)
+        if customer_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=customer_id,
+                    text=(
+                        f"✅ Кур’єр взяв ваше замовлення №{order_id}.\n"
+                        "Тепер ви можете зв’язатись з кур’єром або написати в техпідтримку через меню нижче 👇"
+                    ),
+                    reply_markup=customer_active_menu()
+                )
+            except Exception:
+                pass
 
         return
 
@@ -3033,10 +3215,10 @@ def build_app() -> Application:
             WHEN_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, when_input)],
             WHEN_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, when_confirm)],
 
-            FROM_ADDR: [MessageHandler(filters.TEXT & ~filters.COMMAND, from_addr)],
+            FROM_ADDR: [MessageHandler(filters.LOCATION, from_addr), MessageHandler(filters.TEXT & ~filters.COMMAND, from_addr)],
             CONFIRM_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_from)],
 
-            TO_ADDR: [MessageHandler(filters.TEXT & ~filters.COMMAND, to_addr)],
+            TO_ADDR: [MessageHandler(filters.LOCATION, to_addr), MessageHandler(filters.TEXT & ~filters.COMMAND, to_addr)],
             CONFIRM_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_to)],
 
             BUY_LIST: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_list)],
@@ -3107,3 +3289,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# === PART 2/2 END ===
