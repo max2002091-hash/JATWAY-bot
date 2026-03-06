@@ -45,13 +45,14 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
 # ✅ Фіксовані номери підтримки (клієнтська)
 SUPPORT_PHONE_1 = "+380968130807"
+SUPPORT_PHONE_2 = "+380687294365"
 
 # Робочі години
 WORK_HOURS_START = os.getenv("WORK_HOURS_START", "10:00").strip()
 WORK_HOURS_END = os.getenv("WORK_HOURS_END", "22:00").strip()
 
 # Оплата / гарантія
-PAYMENT_CARD = os.getenv("PAYMENT_CARD", "4035200043852653").strip()
+PAYMENT_CARD = os.getenv("PAYMENT_CARD", "4441111026102602").strip()
 PAYMENT_RECEIVER_NAME = os.getenv("PAYMENT_RECEIVER_NAME", "Jetway Delivery").strip()
 
 REMINDER_BEFORE_CANCEL_MIN = int(os.getenv("REMINDER_BEFORE_CANCEL_MIN", "5"))
@@ -657,7 +658,8 @@ def support_text() -> str:
     return (
         "🛠 Підтримка\n"
         f"📞 Наші номери:\n"
-        f"{SUPPORT_PHONE_1}\n\n"
+        f"• {SUPPORT_PHONE_1}\n"
+        f"• {SUPPORT_PHONE_2}\n\n"
         "Натисни «📞 Зателефонуйте мені» або напиши свій номер — ми передзвонимо."
     )
 
@@ -675,6 +677,7 @@ def courier_menu():
         [
             ["📦 Мої активні", "💳 Мій баланс"],
             ["⭐ Мій рейтинг", "🆔 Мій ID"],
+            ["🔄 Закрити замовлення"],
             ["🆘 Техпідтримка"],
             ["⬅️ Клієнтське меню"],
         ],
@@ -943,6 +946,71 @@ def kb_accept(order_id: str) -> InlineKeyboardMarkup:
     ])
 
 
+
+
+
+async def repost_order_to_dispatcher(context: ContextTypes.DEFAULT_TYPE, order_id: str):
+    """Repost an order back to dispatcher chat so another courier can take it."""
+    order = ORDERS_DB.get(order_id)
+    if not order:
+        return
+
+    outside = bool(order.get("outside"))
+    outside_text = "🌆 За містом\n" if outside else "🏢 По місту\n"
+
+    when_line = order.get("when_label") or order.get("when") or "-"
+    from_addr_v = order.get("from_addr") or "-"
+    to_addr_v = order.get("to_addr") or "-"
+    from_coords = order.get("from_coords")
+    to_coords = order.get("to_coords")
+
+    total = int(order.get("total") or 0)
+
+    if order.get("delivery_mode") == "buy":
+        title = f"🟡 **ВИКУП • ПОТРІБЕН ЧЕК** №{order_id}"
+        body = (
+            outside_text
+            + f"🕒 Час: {when_line}\n"
+            + f"📍 Звідки: {from_addr_v}\n"
+            + f"📍 Гео (ЗВІДКИ): {fmt_link(from_coords)}\n"
+            + f"🎯 Куди: {to_addr_v}\n"
+            + f"📍 Гео (КУДИ): {fmt_link(to_coords)}\n"
+            + f"🧾 Список: {order.get('buy_list','-')}\n"
+            + f"💰 Орієнт. сума покупок: {int(order.get('buy_approx_sum') or 0)} грн\n"
+            + f"🔒 Гарантія: {int(order.get('guarantee_amount') or 0)} грн\n"
+            + f"📞 Телефон клієнта: {order.get('phone') or 'не вказано'}\n"
+            + f"💬 Коментар: {order.get('comment','-')}\n"
+            + "------------------------\n"
+            + f"💰 Доставка (авто): {total} грн\n"
+        )
+    else:
+        title = f"🚚 **НОВЕ ЗАМОВЛЕННЯ №{order_id}**"
+        body = (
+            outside_text
+            + f"🕒 Час: {when_line}\n"
+            + f"📍 Звідки: {from_addr_v}\n"
+            + f"🧭 Коорд. звідки: {fmt_coords(from_coords)}\n"
+            + f"📍 Гео (ЗВІДКИ): {fmt_link(from_coords)}\n"
+            + f"🎯 Куди: {to_addr_v}\n"
+            + f"🧭 Коорд. куди: {fmt_coords(to_coords)}\n"
+            + f"📍 Гео (КУДИ): {fmt_link(to_coords)}\n"
+            + f"📦 Що: {order.get('item','-')}\n"
+            + f"📞 Тел: {order.get('phone') or 'не вказано'}\n"
+            + f"💬 Коментар: {order.get('comment','-')}\n"
+            + "------------------------\n"
+            + f"💰 До сплати клієнтом: {total} грн\n"
+        )
+
+    msg_to_couriers = f"{title}\n{body}"
+    dispatcher_chat = order.get("admin_chat_id") or dispatcher_chat_id()
+    if dispatcher_chat:
+        sent = await context.bot.send_message(
+            chat_id=dispatcher_chat,
+            text=msg_to_couriers,
+            reply_markup=kb_accept(order_id),
+            parse_mode="Markdown"
+        )
+        order["admin_msg_id"] = sent.message_id
 
 def kb_courier_active_list(order_ids: List[str]) -> InlineKeyboardMarkup:
     rows = []
@@ -1575,18 +1643,98 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    if data.startswith("active:close:"):
-        oid = data.split(":", 2)[2]
+    
+    # Закриття активного замовлення owner-ом:
+    # - з комісією (списує fee з курʼєра)
+    # - без комісії (fee=0, баланс не змінюємо)
+    if data.startswith("active:close_fee:") or data.startswith("active:close_nofee:") or data.startswith("active:close:"):
+        parts = data.split(":")
+        # active:close_fee:<id>  | active:close_nofee:<id> | active:close:<id> (legacy)
+        oid = parts[-1]
         order = ORDERS_DB.get(oid)
         if not order or order.get("status") == "closed":
             await context.bot.send_message(OWNER_CHAT_ID, f"⚠️ Замовлення №{oid} не знайдено або вже закрито.")
             return
 
-        final_total = int(order.get("total") or 0)
-        final_fee = int(order.get("fee") or 0)
-        manual_dist = None
-        await finalize_and_close_order(context, oid, final_total, final_fee, manual_dist, closed_by="owner")
-        await context.bot.send_message(OWNER_CHAT_ID, f"✅ №{oid} закрито (owner). Комісію списано.")
+        final_total = int(order.get("manual_total") or order.get("total") or 0)
+        if data.startswith("active:close_nofee:"):
+            final_fee = 0
+            closed_by = "owner (no fee)"
+        else:
+            final_fee = int(order.get("manual_fee") or order.get("fee") or 0)
+            closed_by = "owner"
+
+        courier_id = order.get("courier_id")
+        courier_balance_before = db_get_balance(int(courier_id)) if courier_id else None
+
+        # списання комісії (або ні)
+        if courier_id and final_fee:
+            db_add_balance(int(courier_id), -final_fee)
+
+        courier_balance_after = db_get_balance(int(courier_id)) if courier_id else None
+
+        # mark closed & save
+        order["status"] = "closed"
+        order["closed_at"] = datetime.now(TZ).isoformat()
+        order["closed_by"] = closed_by
+        order["final_total"] = final_total
+        order["final_fee"] = final_fee
+        order["final_dist"] = order.get("manual_dist") or order.get("dist_km") or order.get("distance_km")
+
+        db_add_closed_order(
+            order_id=oid,
+            closed_at=order["closed_at"],
+            customer_id=int(order.get("customer_id") or 0),
+            customer_name=str(order.get("customer_name") or ""),
+            customer_username=str(order.get("customer_username") or ""),
+            courier_id=int(courier_id or 0),
+            courier_name=str(order.get("courier_name") or ""),
+            courier_username=str(order.get("courier_username") or ""),
+            delivery_mode=str(order.get("delivery_mode") or ""),
+            distance=float(order.get("final_dist") or 0),
+            total=int(final_total),
+            fee=int(final_fee),
+            courier_balance=int(courier_balance_after or 0),
+            closed_by=str(closed_by),
+        )
+
+        # повідомлення курʼєру
+        if courier_id:
+            try:
+                txt_c = (
+                    f"✅ №{oid} закрито owner-ом.\n"
+                    f"📉 Комісія: {final_fee} грн.\n"
+                    f"💰 Баланс: {courier_balance_after} грн"
+                )
+                await context.bot.send_message(int(courier_id), txt_c, reply_markup=courier_menu())
+            except Exception:
+                pass
+
+        # повідомлення owner
+        try:
+            dt_str = datetime.fromisoformat(order["closed_at"]).astimezone(TZ).strftime("%d.%m.%Y %H:%M:%S")
+        except Exception:
+            dt_str = order["closed_at"]
+
+        text_owner = (
+            f"🏁 **ЗАМОВЛЕННЯ №{oid} ЗАКРИТО**\n"
+            "--------------------------\n"
+            f"👤 Клієнт: {order.get('customer_name','-')} (@{order.get('customer_username') or '-'})\n"
+            f"🚚 Кур'єр: {order.get('courier_name','-')} (ID: {courier_id or '-'})\n"
+            f"🧾 Тип: {'🛒 ВИКУП' if order.get('delivery_mode')=='buy' else '📦 ГОТОВЕ'}\n"
+            f"📏 Дистанція: {order.get('final_dist','-')} км\n"
+            f"💰 Каса (клієнт сплатив): {final_total} грн\n"
+            f"📈 Комісія: {final_fee} грн\n"
+            f"💳 Баланс кур'єра: {(courier_balance_after if courier_id else '-')} грн\n"
+            f"🔒 Закрив: {closed_by}\n"
+            f"🕒 Час: {dt_str}\n"
+        )
+
+        await context.bot.send_message(
+            OWNER_CHAT_ID,
+            text_owner,
+            parse_mode="Markdown",
+        )
         return
 
     if data == "checks:list":
@@ -1638,7 +1786,6 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     )
                 except Exception:
                     pass
-        return
         return
 
     if data == "owner:add":
@@ -2005,6 +2152,66 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
 # =========================
 # ===== Courier menu router
 # =========================
+
+# =========================
+# ===== Return order (no fee) confirmation ====
+# =========================
+async def return_contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Courier sends phone for feedback to request returning an order back to dispatcher (no fee)."""
+    if not is_private_chat(update):
+        return
+    if not update.message:
+        return
+
+    courier_id = update.effective_user.id
+    pending = context.application.bot_data.get("return_pending", {})
+    order_id = pending.get(courier_id)
+    if not order_id:
+        return
+
+    phone = "-"
+    if update.message.contact and update.message.contact.phone_number:
+        phone = update.message.contact.phone_number
+    elif update.message.text:
+        phone = update.message.text.strip()
+
+    # consume pending
+    pending.pop(courier_id, None)
+    context.application.bot_data["return_pending"] = pending
+
+    order = ORDERS_DB.get(order_id) or {}
+    u = update.effective_user
+
+    if not OWNER_CHAT_ID:
+        await update.message.reply_text("❌ Не налаштовано OWNER_CHAT_ID.", reply_markup=courier_menu())
+        return
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Повернути в диспетчерську (без комісії)", callback_data=f"return:ok:{order_id}:{courier_id}"),
+        ],
+        [
+            InlineKeyboardButton("❌ Відхилити", callback_data=f"return:no:{order_id}:{courier_id}"),
+        ]
+    ])
+
+    msg = (
+        "🔄 **Запит повернення замовлення в диспетчерську (без комісії)**\n\n"
+        f"Замовлення: №{order_id}\n"
+        f"Курʼєр: {u.full_name} (@{u.username or '-'})\n"
+        f"ID: {courier_id}\n"
+        f"Телефон для фідбеку: {phone}\n"
+        f"Статус: {order.get('status','-')}\n"
+    )
+
+
+    try:
+        await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown", reply_markup=kb)
+        await update.message.reply_text("✅ Запит відправлено адміну. Очікуйте рішення.", reply_markup=courier_menu())
+    except Exception:
+        await update.message.reply_text("❌ Не вдалося надіслати запит адміну. Перевір OWNER_CHAT_ID/доступ бота.", reply_markup=courier_menu())
+
+
 async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not update.message or not update.message.text:
         return False
@@ -2050,6 +2257,28 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(
             "🆘 Надішліть номер телефону кнопкою нижче або текстом — адміну прийде ваш контакт.",
             reply_markup=support_share_contact_kb()
+        )
+        return True
+
+    
+    if text == "🔄 Закрити замовлення":
+        # Повернення активного замовлення в диспетчерську (без списання комісії) через підтвердження owner
+        active_ids = [str(oid) for oid, o in ORDERS_DB.items()
+                      if o.get("courier_id") == uid and (o.get("status") in ("accepted", "delivered_wait_done") or o.get("manual_pending"))]
+
+        if not active_ids:
+            await update.message.reply_text("📭 У вас немає активних замовлень.", reply_markup=courier_menu())
+            return True
+
+        # Якщо декілька — даємо вибір
+        kb = []
+        for oid in active_ids[:10]:
+            kb.append([InlineKeyboardButton(f"🔄 Повернути №{oid}", callback_data=f"return:req:{oid}")])
+
+        await update.message.reply_text(
+            "🔄 Оберіть замовлення, яке потрібно повернути в диспетчерську.\n"
+            "Після цього бот попросить номер телефону для фідбеку — запит піде в owner-групу на підтвердження.",
+            reply_markup=InlineKeyboardMarkup(kb)
         )
         return True
 
@@ -2934,6 +3163,81 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith(("stats:", "export:", "ratings:", "checks:", "closed:", "active:", "owner:", "bl:", "wh:")):
         return await owner_panel_callback(update, context)
 
+    # return order to dispatcher (courier request + owner confirmation)
+    if data.startswith("return:req:"):
+        await query.answer()
+        order_id = data.split(":", 2)[2]
+        order = ORDERS_DB.get(order_id)
+        if not order:
+            return await query.answer("Замовлення не знайдено.", show_alert=True)
+        if query.from_user.id != order.get("courier_id"):
+            return await query.answer("❌ Це не ваше замовлення.", show_alert=True)
+
+        # mark pending: courier must send phone/contact
+        context.application.bot_data.setdefault("return_pending", {})
+        context.application.bot_data["return_pending"][query.from_user.id] = order_id
+
+        await context.bot.send_message(
+            chat_id=query.from_user.id,
+            text="📞 Надішліть номер телефону для фідбеку (кнопкою «Поділитися контактом» або просто текстом).",
+            reply_markup=support_share_contact_kb(),
+        )
+        return
+
+    if data.startswith("return:ok:") or data.startswith("return:no:"):
+        await query.answer()
+        parts = data.split(":")
+        action = parts[1]  # ok/no
+        order_id = parts[2] if len(parts) > 2 else ""
+        courier_id = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else None
+
+        # only owner can confirm
+        if query.message.chat.id != OWNER_CHAT_ID:
+            return await query.answer("Недостатньо прав.", show_alert=True)
+
+        order = ORDERS_DB.get(order_id)
+        if not order:
+            await context.bot.send_message(OWNER_CHAT_ID, f"⚠️ Замовлення №{order_id} не знайдено.")
+            return
+
+        if action == "no":
+            # deny
+            if courier_id:
+                try:
+                    await context.bot.send_message(courier_id, f"❌ Запит на повернення замовлення №{order_id} відхилено адміністратором.")
+                except Exception:
+                    pass
+            await query.edit_message_reply_markup(reply_markup=None)
+            await context.bot.send_message(OWNER_CHAT_ID, f"❌ Відхилено повернення №{order_id}.")
+            return
+
+        # approve: unassign courier and re-post to dispatcher
+        old_courier_id = order.get("courier_id")
+        order["courier_id"] = None
+        order["courier_name"] = None
+        order["courier_username"] = None
+        order["status"] = "searching"
+        order["manual_pending"] = False  # якщо було — скидаємо, щоб інший курʼєр брав з нуля
+
+        # notify courier
+        if old_courier_id:
+            try:
+                await context.bot.send_message(old_courier_id, f"✅ Замовлення №{order_id} повернуто в диспетчерську. Комісія не списана.", reply_markup=courier_menu())
+            except Exception:
+                pass
+
+        # repost to dispatcher chat
+        try:
+            await repost_order_to_dispatcher(context, order_id)
+        except Exception:
+            pass
+
+        await query.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(OWNER_CHAT_ID, f"✅ Замовлення №{order_id} повернуто в диспетчерську (без списання комісії).")
+        return
+
+
+
     # guarantee payment flow
     if data.startswith("gpaid:"):
         await query.answer()
@@ -3657,6 +3961,8 @@ def build_app() -> Application:
 
     # after conv: manual km / support contact / rating text / check photo
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT & ~filters.COMMAND), final_km_input_handler), group=3)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT & ~filters.COMMAND), return_contact_handler), group=3)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.CONTACT, return_contact_handler), group=3)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT & ~filters.COMMAND), support_contact_handler), group=3)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.CONTACT, support_contact_handler), group=3)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT & ~filters.COMMAND), rating_text_handler), group=4)
