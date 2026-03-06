@@ -2199,16 +2199,19 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
     )
 
     if OWNER_CHAT_ID:
-        try:
-            rm = kb_owner_force_close(order_id) if order_id else None
-            await context.bot.send_message(
-                chat_id=OWNER_CHAT_ID,
-                text=msg,
-                reply_markup=rm,
-            )
-        except Exception:
-            await update.message.reply_text("❌ Не вдалося надіслати запит адміну. Перевір OWNER_CHAT_ID/доступ бота.", reply_markup=courier_menu())
-            return
+    try:
+        rm = kb_owner_force_close(order_id) if order_id else None
+        await context.bot.send_message(
+            chat_id=OWNER_CHAT_ID,
+            text=msg,
+            reply_markup=rm,
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Не вдалося надіслати запит адміну.\n{e}",
+            reply_markup=courier_menu()
+        )
+        return
 
     order = ORDERS_DB.get(str(order_id)) if order_id else None
     if order:
