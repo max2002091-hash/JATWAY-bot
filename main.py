@@ -670,8 +670,7 @@ def support_text() -> str:
     return (
         "🛠 Підтримка\n"
         f"📞 Наші номери:\n"
-        f"• {SUPPORT_PHONE_1}\n"
-        f"• {SUPPORT_PHONE_2}\n\n"
+        f"• {SUPPORT_PHONE_1}\n\n"
         "Натисни «📞 Зателефонуйте мені» або напиши свій номер — ми передзвонимо."
     )
 
