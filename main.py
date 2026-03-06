@@ -45,7 +45,6 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
 # ✅ Фіксовані номери підтримки (клієнтська)
 SUPPORT_PHONE_1 = "+380968130807"
-SUPPORT_PHONE_2 = "+380687294365"
 
 # Робочі години
 WORK_HOURS_START = os.getenv("WORK_HOURS_START", "10:00").strip()
