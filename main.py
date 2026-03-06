@@ -45,6 +45,7 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
 # ✅ Фіксовані номери підтримки (клієнтська)
 SUPPORT_PHONE_1 = "+380968130807"
+SUPPORT_PHONE_2 = "+380687294365"
 
 # Робочі години
 WORK_HOURS_START = os.getenv("WORK_HOURS_START", "10:00").strip()
@@ -345,8 +346,6 @@ def db_blacklist_list() -> List[Tuple[int, str, str]]:
 
 def is_blacklisted_courier(courier_id: int) -> bool:
     return int(courier_id) in BLACKLISTED_COURIERS
-
-
 def db_add_courier(courier_id: int, username: str = "", full_name: str = ""):
     con = db_connect()
     cur = con.cursor()
@@ -671,7 +670,8 @@ def support_text() -> str:
     return (
         "🛠 Підтримка\n"
         f"📞 Наші номери:\n"
-        f"• {SUPPORT_PHONE_1}\n\n"
+        f"• {SUPPORT_PHONE_1}\n"
+        f"• {SUPPORT_PHONE_2}\n\n"
         "Натисни «📞 Зателефонуйте мені» або напиши свій номер — ми передзвонимо."
     )
 
@@ -691,7 +691,7 @@ def courier_menu():
             ["⭐ Мій рейтинг", "🆔 Мій ID"],
             ["🔄 Закрити замовлення"],
             ["🆘 Техпідтримка"],
-            ["⬅️ Курєрське меню"],
+            ["⬅️ Повернутись на старт"],
         ],
         resize_keyboard=True
     )
@@ -1272,12 +1272,34 @@ def get_any_active_order_for_courier(courier_id: int) -> Optional[dict]:
     return None
 
 
+def set_selected_active_order(context: ContextTypes.DEFAULT_TYPE, courier_id: int, order_id: Optional[str]):
+    selected = context.application.bot_data.setdefault("courier_selected_orders", {})
+    if order_id:
+        selected[int(courier_id)] = str(order_id)
+    else:
+        selected.pop(int(courier_id), None)
+
+
+def get_selected_active_order_for_courier(context: ContextTypes.DEFAULT_TYPE, courier_id: int) -> Optional[dict]:
+    selected = context.application.bot_data.get("courier_selected_orders", {})
+    order_id = selected.get(int(courier_id))
+    if order_id:
+        order = ORDERS_DB.get(str(order_id))
+        if order and order.get("courier_id") == courier_id and order.get("status") not in ("closed",):
+            return order
+        selected.pop(int(courier_id), None)
+        context.application.bot_data["courier_selected_orders"] = selected
+
+    return get_single_active_order_for_courier(courier_id) or get_any_active_order_for_courier(courier_id)
+
+
 async def send_courier_active_order_details(context: ContextTypes.DEFAULT_TYPE, courier_id: int, order: Optional[dict]):
     if not order:
         await context.bot.send_message(courier_id, "📭 Активне замовлення не знайдено.", reply_markup=courier_menu())
         return
 
     order_id = str(order.get("order_id") or "-")
+    set_selected_active_order(context, courier_id, order_id)
     when_val = order.get("when_label") or order.get("scheduled_when") or order.get("when") or "-"
 
     if order.get("delivery_mode") == "buy":
@@ -2200,22 +2222,26 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
         f"Замовлення: №{order_id}\n"
     )
 
-    if OWNER_CHAT_ID:
-       try:
-        rm = kb_owner_force_close(order_id) if order_id else None
-        await context.bot.send_message(
-            chat_id=OWNER_CHAT_ID,
-            text=msg,
-            reply_markup=rm,
-        )
+    target_chat_id = OWNER_CHAT_ID or dispatcher_chat_id()
+    if target_chat_id:
+        try:
+            rm = kb_owner_force_close(order_id) if order_id else None
+            await context.bot.send_message(
+                chat_id=target_chat_id,
+                text=msg,
+                reply_markup=rm,
+            )
         except Exception as e:
-        await update.message.reply_text(
-            f"❌ Не вдалося надіслати запит адміну.\n{e}",
-            reply_markup=courier_menu()
-        )
+            await update.message.reply_text(
+                f"❌ Не вдалося надіслати запит адміну.\n{e}",
+                reply_markup=courier_menu()
+            )
+            return
+    else:
+        await update.message.reply_text("❌ Не налаштовано OWNER_CHAT_ID / чат адміністратора.", reply_markup=courier_menu())
         return
 
-       order = ORDERS_DB.get(str(order_id)) if order_id else None
+    order = ORDERS_DB.get(str(order_id)) if order_id else None
     if order:
         await update.message.reply_text(
             "✅ Запит надіслано адміну. Оберіть дію нижче.",
@@ -2310,6 +2336,7 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
             "📸 Надіслати чек (фото)",
             "🆘 Техпідтримка",
             "⬅️ Курєрське меню",
+            "⬅️ Повернутись на старт",
         }
         if text in courier_buttons:
             await update.message.reply_text("❌ Ви не є кур’єром. Якщо треба — зверніться до адміністратора.")
@@ -2331,7 +2358,7 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         return True
 
     if text == "✅ Доставлено":
-        order = get_single_active_order_for_courier(uid)
+        order = get_selected_active_order_for_courier(context, uid)
         if not order:
             await update.message.reply_text("Оберіть активне замовлення через «📦 Мої активні».", reply_markup=courier_menu())
             return True
@@ -2351,11 +2378,12 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         except Exception:
             pass
+        set_selected_active_order(context, uid, order_id)
         await update.message.reply_text(f"✅ Позначено як доставлено: №{order_id}", reply_markup=courier_active_order_menu(bool(order.get("delivery_mode") == "buy")))
         return True
 
     if text == "📸 Надіслати чек (фото)":
-        order = get_single_active_order_for_courier(uid)
+        order = get_selected_active_order_for_courier(context, uid)
         if not order or order.get("delivery_mode") != "buy":
             await update.message.reply_text("Оберіть активне замовлення через «📦 Мої активні».", reply_markup=courier_menu())
             return True
@@ -2366,7 +2394,7 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if text == "🆘 Техпідтримка":
         # загальна техпідтримка з кур'єр меню (не по конкретному замовленню)
-        order = get_single_active_order_for_courier(uid)
+        order = get_selected_active_order_for_courier(context, uid)
         SUPPORT_CONTACT_PENDING[uid] = str(order.get("order_id")) if order else None
         await update.message.reply_text(
             "Надішліть номер телефону кнопкою нижче — адміну прийде ваш контакт.",
@@ -2417,7 +2445,7 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         return True
 
     if text == "↩️ Повернутись до замовлення":
-        order = get_any_active_order_for_courier(uid)
+        order = get_selected_active_order_for_courier(context, uid)
         if order:
             await send_courier_active_order_details(context, uid, order)
         else:
@@ -2426,6 +2454,10 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if text == "⬅️ Курєрське меню":
         await update.message.reply_text("Повертаю в меню кур’єра 👇", reply_markup=courier_menu())
+        return True
+
+    if text == "⬅️ Повернутись на старт":
+        await update.message.reply_text("Повертаю на старт 👇", reply_markup=role_menu())
         return True
 
     return False
@@ -3553,18 +3585,15 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # support pick
-    if val == "cancel":
-        try:
-             await query.edit_message_text("Скасовано ✅")
-        except Exception as e:
-        try:
-            await context.bot.send_message(
-                chat_id=OWNER_CHAT_ID,
-                text=f"support_pick cancel error: {e}"
-            )
-        except Exception:
-            pass
-        return
+    if data.startswith("support_pick:"):
+        await query.answer()
+        val = data.split(":", 1)[1]
+        if val == "cancel":
+            try:
+                await query.edit_message_text("Скасовано ✅")
+            except Exception:
+                pass
+            return
 
         order_id = val
         order = ORDERS_DB.get(order_id)
@@ -3583,11 +3612,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         try:
             await query.edit_message_text(f"🆘 Запит по №{order_id} створено. Надішліть номер в особисті боту.")
-        except Exception as e:
-            await context.bot.send_message(
-            chat_id=courier_id,
-            text=e
-        )
+        except Exception:
             pass
         return
 
@@ -3604,6 +3629,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if courier_id != order.get("courier_id"):
             return await query.answer("❌ Це не ваше замовлення.", show_alert=True)
 
+        set_selected_active_order(context, courier_id, order_id)
         await send_courier_active_order_details(context, courier_id, order)
         return
 
@@ -3641,6 +3667,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order["courier_username"] = query.from_user.username or "-"
         order["courier_username"] = query.from_user.username or "-"
         order["status"] = "accepted"
+        set_selected_active_order(context, courier_id, order_id)
 
         # ✅ позначаємо активне замовлення у клієнта (щоб показати меню зв'язку/підтримки)
         ca = context.application.bot_data.get("customer_active_orders", {})
@@ -3756,6 +3783,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if courier_id != order.get("courier_id"):
             return await query.answer("❌ Це не ваше замовлення.", show_alert=True)
 
+        set_selected_active_order(context, courier_id, order_id)
         order["status"] = "await_customer"
 
         # delete dispatcher msg
@@ -3994,6 +4022,7 @@ async def post_init(app: Application):
     app.bot_data.setdefault("guarantee_pending", {})
     app.bot_data.setdefault("rating_pending", {})
     app.bot_data.setdefault("check_pending", {})
+    app.bot_data.setdefault("courier_selected_orders", {})
     app.bot_data.setdefault("buy_details_pending", {})
 
     if OWNER_CHAT_ID:
