@@ -224,9 +224,21 @@ def db_init():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         order_id TEXT NOT NULL,
         file_id TEXT NOT NULL,
+        media_type TEXT NOT NULL DEFAULT 'photo',
+        file_name TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL
     )
     """)
+
+    # М'яка міграція старої таблиці без зламу існуючої БД
+    try:
+        cur.execute("ALTER TABLE purchase_checks ADD COLUMN media_type TEXT NOT NULL DEFAULT 'photo'")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE purchase_checks ADD COLUMN file_name TEXT NOT NULL DEFAULT ''")
+    except Exception:
+        pass
 
     con.commit()
     con.close()
@@ -517,12 +529,12 @@ async def show_my_rating(update: Update, context: ContextTypes.DEFAULT_TYPE, cou
         await update.callback_query.message.reply_text(msg, parse_mode="Markdown", reply_markup=courier_menu())
 
 
-def db_insert_purchase_check(order_id: str, file_id: str):
+def db_insert_purchase_check(order_id: str, file_id: str, media_type: str = "photo", file_name: str = ""):
     con = db_connect()
     cur = con.cursor()
     cur.execute(
-        "INSERT INTO purchase_checks(order_id, file_id, created_at) VALUES(?,?,?)",
-        (order_id, file_id, datetime.now(TZ).isoformat()),
+        "INSERT INTO purchase_checks(order_id, file_id, media_type, file_name, created_at) VALUES(?,?,?,?,?)",
+        (order_id, file_id, (media_type or "photo"), (file_name or ""), datetime.now(TZ).isoformat()),
     )
     con.commit()
     con.close()
@@ -532,7 +544,7 @@ def db_get_checks(limit: int = 20) -> List[sqlite3.Row]:
     con = db_connect()
     cur = con.cursor()
     rows = cur.execute(
-        "SELECT order_id, file_id, created_at FROM purchase_checks ORDER BY id DESC LIMIT ?",
+        "SELECT order_id, file_id, media_type, file_name, created_at FROM purchase_checks ORDER BY id DESC LIMIT ?",
         (int(limit),),
     ).fetchall()
     con.close()
@@ -1125,12 +1137,14 @@ def kb_rate(order_id: str, courier_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def support_share_contact_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 Поділитись номером", request_contact=True)],
-         ["⬅️ Назад в меню"]],
-        resize_keyboard=True
-    )
+def support_share_contact_kb(has_active_order: bool = False) -> ReplyKeyboardMarkup:
+    rows = [[KeyboardButton("📱 Поділитись номером", request_contact=True)]]
+    if has_active_order:
+        rows.append(["↩️ Повернутись до замовлення"])
+        rows.append(["⬅️ Курєрське меню"])
+    else:
+        rows.append(["⬅️ Назад в меню"])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 def kb_support_pick(orders: List[str]) -> InlineKeyboardMarkup:
@@ -1249,6 +1263,56 @@ def get_single_active_order_for_courier(courier_id: int) -> Optional[dict]:
     if len(active) == 1:
         return active[0]
     return None
+
+
+def get_any_active_order_for_courier(courier_id: int) -> Optional[dict]:
+    for o in ORDERS_DB.values():
+        if o.get("courier_id") == courier_id and o.get("status") not in ("closed",):
+            return o
+    return None
+
+
+async def send_courier_active_order_details(context: ContextTypes.DEFAULT_TYPE, courier_id: int, order: Optional[dict]):
+    if not order:
+        await context.bot.send_message(courier_id, "📭 Активне замовлення не знайдено.", reply_markup=courier_menu())
+        return
+
+    order_id = str(order.get("order_id") or "-")
+    when_val = order.get("when_label") or order.get("scheduled_when") or order.get("when") or "-"
+
+    if order.get("delivery_mode") == "buy":
+        info = (
+            f"📦 **Активне замовлення №{order_id}**\n"
+            f"🟡 ВИКУП • ПОТРІБЕН ЧЕК\n"
+            f"🕒 Час: {when_val}\n"
+            f"📍 Звідки: {order.get('from_addr','-')}\n"
+            f"🎯 Куди: {order.get('to_addr','-')}\n"
+            f"🧾 Список: {order.get('buy_list','-')}\n"
+            f"🔒 Гарантія: {order.get('guarantee_amount','-')} грн\n"
+            f"📞 Телефон клієнта: {order.get('phone','-')}\n"
+        )
+    else:
+        info = (
+            f"📦 **Активне замовлення №{order_id}**\n"
+            f"🕒 Час: {when_val}\n"
+            f"📍 Звідки: {order.get('from_addr','-')}\n"
+            f"🎯 Куди: {order.get('to_addr','-')}\n"
+            f"📦 Що: {order.get('item','-')}\n"
+            f"📞 Телефон клієнта: {order.get('phone','-')}\n"
+        )
+
+    await context.bot.send_message(
+        chat_id=courier_id,
+        text=info,
+        parse_mode="Markdown",
+        reply_markup=courier_active_order_menu(bool(order.get("delivery_mode") == "buy"))
+    )
+
+    kb_contact = kb_contact_customer(order_id, int(order.get("customer_id") or 0), str(order.get("customer_username") or "-"))
+    if kb_contact:
+        await context.bot.send_message(chat_id=courier_id, text="📞 Зв’язок з клієнтом:", reply_markup=kb_contact)
+    else:
+        await context.bot.send_message(chat_id=courier_id, text="📞 Зв’язок з клієнтом: у клієнта немає username в Telegram.")
 
 
 def _money_int_from_text(txt: str) -> Optional[int]:
@@ -1596,25 +1660,24 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 dt = datetime.fromisoformat(r["closed_at"])
                 dt_str = dt.astimezone(TZ).strftime("%d.%m.%Y %H:%M")
             except Exception:
-                dt_str = str(r.get("closed_at") or "-")
+                dt_str = str(r["closed_at"] or "-")
 
-            mode = "🛒 ВИКУП" if r.get("delivery_mode") == "buy" else "📦 ГОТОВЕ"
-            courier = r.get("courier_name") or str(r.get("courier_id") or "-")
-            customer = r.get("customer_name") or "-"
-            cuser = r.get("customer_username") or "-"
+            mode = "🛒 ВИКУП" if r["delivery_mode"] == "buy" else "📦 ГОТОВЕ"
+            courier = r["courier_name"] or str(r["courier_id"] or "-")
+            customer = r["customer_name"] or "-"
+            cuser = r["customer_username"] or "-"
 
             parts.append(
                 f"🗓 {dt_str}\n"
-                f"№{r.get('order_id')} | {mode} | {r.get('delivery_key','-')}\n"
+                f"№{r['order_id']} | {mode} | {r['delivery_key'] or '-'}\n"
                 f"👤 Клієнт: {customer} (@{cuser})\n"
-                f"🚚 Кур’єр: {courier} (ID: {r.get('courier_id') or '-'})\n"
-                f"📍 Звідки: {r.get('from_addr') or '-'}\n"
-                f"🎯 Куди: {r.get('to_addr') or '-'}\n"
-                f"💰 Сума: {r.get('total')} грн | 📈 Комісія: {r.get('fee')} грн\n"
+                f"🚚 Кур’єр: {courier} (ID: {r['courier_id'] or '-'})\n"
+                f"📍 Звідки: {r['from_addr'] or '-'}\n"
+                f"🎯 Куди: {r['to_addr'] or '-'}\n"
+                f"💰 Сума: {r['total']} грн | 📈 Комісія: {r['fee']} грн\n"
                 f"--------------------------"
             )
 
-        # Telegram має ліміт на довжину повідомлення — шлемо частинами
         header = "📚 Закриті замовлення (останні)\n\n"
         chunk = ""
         for part in parts:
@@ -1625,7 +1688,7 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if chunk:
             await context.bot.send_message(OWNER_CHAT_ID, header + chunk)
         return
-    
+
     if data == "active:list":
         # показати активні (не закриті) замовлення
         active = [o for o in ORDERS_DB.values() if o and o.get("status") != "closed"]
@@ -1699,22 +1762,7 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         order["final_fee"] = final_fee
         order["final_dist"] = order.get("manual_dist") or order.get("dist_km") or order.get("distance_km")
 
-        db_add_closed_order(
-            order_id=oid,
-            closed_at=order["closed_at"],
-            customer_id=int(order.get("customer_id") or 0),
-            customer_name=str(order.get("customer_name") or ""),
-            customer_username=str(order.get("customer_username") or ""),
-            courier_id=int(courier_id or 0),
-            courier_name=str(order.get("courier_name") or ""),
-            courier_username=str(order.get("courier_username") or ""),
-            delivery_mode=str(order.get("delivery_mode") or ""),
-            distance=float(order.get("final_dist") or 0),
-            total=int(final_total),
-            fee=int(final_fee),
-            courier_balance=int(courier_balance_after or 0),
-            closed_by=str(closed_by),
-        )
+        db_insert_closed_order(order, final_total, final_fee)
 
         # повідомлення курʼєру
         if courier_id:
@@ -1761,25 +1809,25 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await context.bot.send_message(OWNER_CHAT_ID, "🧾 Архів чеків порожній.")
             return
 
-        # 1) Пишемо список
         items: List[str] = []
         for r in rows[:30]:
             try:
                 dt = datetime.fromisoformat(r["created_at"])
                 dt_str = dt.astimezone(TZ).strftime("%d.%m.%Y %H:%M")
             except Exception:
-                dt_str = str(r.get("created_at") or "-")
-            items.append(f"• №{r.get('order_id')} | {dt_str}")
+                dt_str = str(r["created_at"] or "-")
+            media_label = {"photo": "Фото", "document": "Файл", "video": "Відео"}.get((r["media_type"] or "photo"), "Медіа")
+            name_part = f" | {r['file_name']}" if r["file_name"] else ""
+            items.append(f"• №{r['order_id']} | {media_label} | {dt_str}{name_part}")
 
         await context.bot.send_message(
             OWNER_CHAT_ID,
-            "🧾 **Останні чеки (викуп)**\n\n" + "\n".join(items),
+            "🧾 **Останні чеки / медіа**\n\n" + "\n".join(items),
             parse_mode="Markdown",
         )
 
-        # 2) Додаємо фото чеків (останні 10)
         for r in rows[:10]:
-            file_id = r.get("file_id")
+            file_id = r["file_id"]
             if not file_id:
                 continue
             try:
@@ -1787,20 +1835,22 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     dt = datetime.fromisoformat(r["created_at"])
                     dt_str = dt.astimezone(TZ).strftime("%d.%m.%Y %H:%M")
                 except Exception:
-                    dt_str = str(r.get("created_at") or "-")
+                    dt_str = str(r["created_at"] or "-")
 
-                await context.bot.send_photo(
-                    chat_id=OWNER_CHAT_ID,
-                    photo=file_id,
-                    caption=f"🧾 Чек (викуп)\n№{r.get('order_id')}\n🗓 {dt_str}",
-                )
+                caption = f"🧾 Архів медіа по замовленню №{r['order_id']}\n🗓 {dt_str}"
+                media_type = (r["media_type"] or "photo").lower()
+                if media_type == "photo":
+                    await context.bot.send_photo(chat_id=OWNER_CHAT_ID, photo=file_id, caption=caption)
+                elif media_type == "video":
+                    await context.bot.send_video(chat_id=OWNER_CHAT_ID, video=file_id, caption=caption)
+                else:
+                    await context.bot.send_document(chat_id=OWNER_CHAT_ID, document=file_id, caption=caption)
             except Exception:
-                # якщо це не photo file_id (інколи може бути document) — пробуємо як документ
                 try:
                     await context.bot.send_document(
                         chat_id=OWNER_CHAT_ID,
                         document=file_id,
-                        caption=f"🧾 Чек (викуп)\n№{r.get('order_id')}",
+                        caption=f"🧾 Архів медіа по замовленню №{r['order_id']}",
                     )
                 except Exception:
                     pass
@@ -2163,7 +2213,14 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text("❌ Не вдалося надіслати запит адміну. Перевір OWNER_CHAT_ID/доступ бота.", reply_markup=courier_menu())
             return
 
-    await update.message.reply_text("✅ Запит надіслано адміну. Очікуй дзвінок.", reply_markup=courier_menu())
+    order = ORDERS_DB.get(str(order_id)) if order_id else None
+    if order:
+        await update.message.reply_text(
+            "✅ Запит надіслано адміну. Оберіть дію нижче.",
+            reply_markup=support_share_contact_kb(True)
+        )
+    else:
+        await update.message.reply_text("✅ Запит надіслано адміну. Очікуй дзвінок.", reply_markup=courier_menu())
 
 
 
@@ -2302,7 +2359,7 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
             return True
         context.application.bot_data.setdefault("check_pending", {})
         context.application.bot_data["check_pending"][uid] = str(order.get("order_id"))
-        await update.message.reply_text("📸 Надішліть фото чека одним повідомленням (як фото).", reply_markup=courier_active_order_menu(True))
+        await update.message.reply_text("📎 Надішліть чек або інший медіа-файл одним повідомленням (фото / файл / відео).", reply_markup=courier_active_order_menu(True))
         return True
 
     if text == "🆘 Техпідтримка":
@@ -2310,8 +2367,8 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         order = get_single_active_order_for_courier(uid)
         SUPPORT_CONTACT_PENDING[uid] = str(order.get("order_id")) if order else None
         await update.message.reply_text(
-            "🆘 Надішліть номер телефону кнопкою нижче або текстом — адміну прийде ваш контакт.",
-            reply_markup=support_share_contact_kb()
+            "Надішліть номер телефону кнопкою нижче — адміну прийде ваш контакт.",
+            reply_markup=support_share_contact_kb(bool(order))
         )
         return True
 
@@ -2357,8 +2414,16 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("Повертаю в меню кур’єра 👇", reply_markup=courier_menu())
         return True
 
+    if text == "↩️ Повернутись до замовлення":
+        order = get_any_active_order_for_courier(uid)
+        if order:
+            await send_courier_active_order_details(context, uid, order)
+        else:
+            await update.message.reply_text("📭 Активне замовлення не знайдено.", reply_markup=courier_menu())
+        return True
+
     if text == "⬅️ Курєрське меню":
-        await update.message.reply_text("Ок, показую клієнтське меню 👇", reply_markup=main_menu())
+        await update.message.reply_text("Повертаю в меню кур’єра 👇", reply_markup=courier_menu())
         return True
 
     return False
@@ -2538,7 +2603,11 @@ async def callme_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🆔 user_id: {user.id}"
     )
     if OWNER_CHAT_ID:
-        await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg)
+        try:
+            await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg)
+        except Exception:
+            await update.message.reply_text("❌ Не вдалося надіслати запит в owner-чат. Перевір OWNER_CHAT_ID і права бота.", reply_markup=main_menu())
+            return CHOICE
 
     await update.message.reply_text("🙏 Дякую за звернення! Очікуйте дзвінок від оператора.", reply_markup=main_menu())
     return CHOICE
@@ -3504,8 +3573,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SUPPORT_CONTACT_PENDING[courier_id] = order_id
         await context.bot.send_message(
             chat_id=courier_id,
-            text="🆘 Надішліть номер телефону кнопкою нижче або текстом — адміну прийде ваш контакт.",
-            reply_markup=support_share_contact_kb()
+            text="Надішліть номер телефону кнопкою нижче — адміну прийде ваш контакт.",
+            reply_markup=support_share_contact_kb(True)
         )
         try:
             await query.edit_message_text(f"🆘 Запит по №{order_id} створено. Надішліть номер в особисті боту.")
@@ -3526,38 +3595,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if courier_id != order.get("courier_id"):
             return await query.answer("❌ Це не ваше замовлення.", show_alert=True)
 
-        # show order info + controls
-        if order.get("delivery_mode") == "buy":
-            kb = kb_courier_controls_buy(order_id)
-            info = (
-                f"📦 **Активне замовлення №{order_id}**\n"
-                f"🟡 ВИКУП • ПОТРІБЕН ЧЕК\n"
-                f"🕒 Час: {order.get('scheduled_when','-')}\n"
-                f"📍 Звідки: {order.get('from_addr','-')}\n"
-                f"🎯 Куди: {order.get('to_addr','-')}\n"
-                f"🧾 Список: {order.get('buy_list','-')}\n"
-                f"🔒 Гарантія: {order.get('guarantee_amount','-')} грн\n"
-                f"📞 Телефон клієнта: {order.get('phone','-')}\n"
-            )
-        else:
-            kb = kb_courier_controls_pickup(order_id)
-            info = (
-                f"📦 **Активне замовлення №{order_id}**\n"
-                f"🕒 Час: {order.get('scheduled_when','-')}\n"
-                f"📍 Звідки: {order.get('from_addr','-')}\n"
-                f"🎯 Куди: {order.get('to_addr','-')}\n"
-                f"📦 Що: {order.get('item','-')}\n"
-                f"📞 Телефон клієнта: {order.get('phone','-')}\n"
-            )
-
-        await context.bot.send_message(chat_id=courier_id, text=info, parse_mode="Markdown", reply_markup=courier_active_order_menu(bool(order.get("delivery_mode") == "buy")))
-
-        # contact button (через t.me/username)
-        kb_contact = kb_contact_customer(order_id, int(order.get("customer_id") or 0), str(order.get("customer_username") or "-"))
-        if kb_contact:
-            await context.bot.send_message(chat_id=courier_id, text="📞 Зв’язок з клієнтом:", reply_markup=kb_contact)
-        else:
-            await context.bot.send_message(chat_id=courier_id, text="📞 Зв’язок з клієнтом: у клієнта немає username в Telegram.")
+        await send_courier_active_order_details(context, courier_id, order)
         return
 
     # accept
@@ -3694,7 +3732,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # set pending in user_data for courier
         context.application.bot_data.setdefault("check_pending", {})
         context.application.bot_data["check_pending"][query.from_user.id] = order_id
-        await context.bot.send_message(query.from_user.id, "📸 Надішліть фото чека одним повідомленням (як фото).")
+        await context.bot.send_message(query.from_user.id, "📎 Надішліть чек або інший медіа-файл одним повідомленням (фото / файл / відео).")
         return
 
     # delivered
@@ -3750,8 +3788,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SUPPORT_CONTACT_PENDING[courier_id] = order_id
         await context.bot.send_message(
             chat_id=courier_id,
-            text="🆘 Надішліть номер телефону кнопкою нижче або текстом — адміну прийде ваш контакт.",
-            reply_markup=support_share_contact_kb()
+            text="Надішліть номер телефону кнопкою нижче — адміну прийде ваш контакт.",
+            reply_markup=support_share_contact_kb(True)
         )
         return
 
@@ -3872,7 +3910,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # ===== Receive check photo
 # =========================
-async def check_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def check_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
     if not is_private_chat(update):
@@ -3884,12 +3922,24 @@ async def check_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not order_id:
         return
 
-    # take highest resolution photo
-    if not update.message.photo:
-        await update.message.reply_text("Надішліть саме фото (як фото, не як файл).")
-        return
+    media_type = None
+    file_id = None
+    file_name = ""
 
-    file_id = update.message.photo[-1].file_id
+    if update.message.photo:
+        media_type = "photo"
+        file_id = update.message.photo[-1].file_id
+    elif update.message.document:
+        media_type = "document"
+        file_id = update.message.document.file_id
+        file_name = update.message.document.file_name or ""
+    elif update.message.video:
+        media_type = "video"
+        file_id = update.message.video.file_id
+        file_name = getattr(update.message.video, "file_name", "") or ""
+    else:
+        await update.message.reply_text("Надішліть фото, файл або відео одним повідомленням.")
+        return
     pending.pop(courier_id, None)
     context.application.bot_data["check_pending"] = pending
 
@@ -3899,23 +3949,32 @@ async def check_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # store in sql archive
-    db_insert_purchase_check(order_id, file_id)
+    db_insert_purchase_check(order_id, file_id, media_type=media_type, file_name=file_name)
 
     # forward to customer + owner
     customer_id = order.get("customer_id")
-    caption = f"🧾 Чек по замовленню №{order_id}"
+    caption = f"🧾 Медіа по замовленню №{order_id}"
+
+    async def _send_media(chat_id: int):
+        if media_type == "photo":
+            await context.bot.send_photo(chat_id, photo=file_id, caption=caption)
+        elif media_type == "video":
+            await context.bot.send_video(chat_id, video=file_id, caption=caption)
+        else:
+            await context.bot.send_document(chat_id, document=file_id, caption=caption)
+
     try:
         if customer_id:
-            await context.bot.send_photo(customer_id, photo=file_id, caption=caption)
+            await _send_media(int(customer_id))
     except Exception:
         pass
     try:
         if OWNER_CHAT_ID:
-            await context.bot.send_photo(OWNER_CHAT_ID, photo=file_id, caption=caption)
+            await _send_media(int(OWNER_CHAT_ID))
     except Exception:
         pass
 
-    await update.message.reply_text("✅ Чек надіслано клієнту та в овнер-групу.")
+    await update.message.reply_text("✅ Медіа надіслано клієнту та збережено в архіві овнера.")
 
 
 # =========================
@@ -4029,7 +4088,7 @@ def build_app() -> Application:
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT & ~filters.COMMAND), support_contact_handler), group=3)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.CONTACT, support_contact_handler), group=3)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT & ~filters.COMMAND), rating_text_handler), group=4)
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.PHOTO, check_photo_handler), group=4)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.PHOTO | filters.VIDEO | filters.Document.ALL), check_media_handler), group=4)
 
     return app
 
