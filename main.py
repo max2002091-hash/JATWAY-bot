@@ -45,6 +45,7 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
 # ✅ Фіксовані номери підтримки (клієнтська)
 SUPPORT_PHONE_1 = "+380968130807"
+SUPPORT_PHONE_2 = "+380687294365"
 
 # Робочі години
 WORK_HOURS_START = os.getenv("WORK_HOURS_START", "10:00").strip()
@@ -64,7 +65,7 @@ PORT = int(os.getenv("PORT", "8000"))
 # ===== Tariffs =====
 # =========================
 PRICE_SCHEDULED_BASE = 120     # ✅ було 110
-PRICE_URGENT_BASE = 120
+PRICE_URGENT_BASE = 170
 BASE_KM = 2
 EXTRA_KM_PRICE = 20            # ✅ було 23
 EXTRA_OUTSIDE_OBUKHIV_PER_KM = 8
@@ -627,9 +628,8 @@ def addr_prompt_text(kind: str) -> str:
         "• с. Германівка, вул. Шевченка 5\n"
         "або\n"
         "• вул. Київська 1, Обухів\n\n"
-        "📍 Можна також натиснути 📎 (скріпку) у полі повідомлення та обрати «Місцезнаходження», "
-        "щоб надіслати точку на карті.\n"
-        "⚠️ Якщо не виходить — надішли лінк Google Maps або координати (lat, lon)."
+        "📍 Можна також натиснути «📍 Поділитись точкою» для точнішого розрахунку.\n"
+        "⚠️ У Telegram Desktop (ПК) кнопка геолокації може не відкриватися. Якщо так — надішли лінк Google Maps або координати (lat, lon). На телефоні кнопка працює."
     )
 
 
@@ -658,7 +658,8 @@ def support_text() -> str:
     return (
         "🛠 Підтримка\n"
         f"📞 Наші номери:\n"
-        f"• {SUPPORT_PHONE_1}\n\n"
+        f"• {SUPPORT_PHONE_1}\n"
+        f"• {SUPPORT_PHONE_2}\n\n"
         "Натисни «📞 Зателефонуйте мені» або напиши свій номер — ми передзвонимо."
     )
 
@@ -678,11 +679,20 @@ def courier_menu():
             ["⭐ Мій рейтинг", "🆔 Мій ID"],
             ["🔄 Закрити замовлення"],
             ["🆘 Техпідтримка"],
-            ["⬅️ Клієнтське меню"],
+            ["⬅️ Курєрське меню"],
         ],
         resize_keyboard=True
     )
 
+
+
+def courier_active_order_menu(is_buy: bool = False) -> ReplyKeyboardMarkup:
+    rows = []
+    if is_buy:
+        rows.append(["📸 Надіслати чек (фото)"])
+    rows.append(["✅ Доставлено", "🆘 Техпідтримка"])
+    rows.append(["📦 Мої активні", "⬅️ Курєрське меню"])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 def customer_active_menu() -> ReplyKeyboardMarkup:
@@ -1234,6 +1244,13 @@ def courier_active_order_ids(courier_id: int) -> List[str]:
     return ids
 
 
+def get_single_active_order_for_courier(courier_id: int) -> Optional[dict]:
+    active = [o for o in ORDERS_DB.values() if o.get("courier_id") == courier_id and o.get("status") in ("accepted", "await_customer", "await_finish", "searching") and o.get("status") != "closed"]
+    if len(active) == 1:
+        return active[0]
+    return None
+
+
 def _money_int_from_text(txt: str) -> Optional[int]:
     s = (txt or "").strip().replace(",", ".")
     m = re.search(r"(\d+(\.\d+)?)", s)
@@ -1632,11 +1649,14 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             fee = o.get("fee")
             lines.append(f"• №{oid} | {mode} | {st} | {dist_s} | {total} грн | fee {fee} | кур'єр: {courier}")
             if oid:
-                buttons.append([InlineKeyboardButton(f"✅ Закрити №{oid}", callback_data=f"active:close:{oid}")])
+                buttons.append([
+                    InlineKeyboardButton(f"✅ З комісією №{oid}", callback_data=f"active:close_fee:{oid}"),
+                    InlineKeyboardButton(f"🆓 Без комісії №{oid}", callback_data=f"active:close_nofee:{oid}"),
+                ])
 
         await context.bot.send_message(
             OWNER_CHAT_ID,
-            "🟢 Активні замовлення\n\n" + "\n".join(lines) + "\n\nНатисни кнопку, щоб закрити замовлення (спише комісію з кур’єра).",
+            "🟢 Активні замовлення\n\n" + "\n".join(lines) + "\n\nОберіть дію: закрити із комісією або без комісії.",
             reply_markup=InlineKeyboardMarkup(buttons[:10]) if buttons else None,
         )
         return
@@ -2204,7 +2224,7 @@ async def return_contact_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 
     try:
-        await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown", reply_markup=kb)
+        await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, reply_markup=kb)
         await update.message.reply_text("✅ Запит відправлено адміну. Очікуйте рішення.", reply_markup=courier_menu())
     except Exception:
         await update.message.reply_text("❌ Не вдалося надіслати запит адміну. Перевір OWNER_CHAT_ID/доступ бота.", reply_markup=courier_menu())
@@ -2227,8 +2247,10 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
             "💳 Мій баланс",
             "⭐ Мій рейтинг",
             "🆔 Мій ID",
+            "✅ Доставлено",
+            "📸 Надіслати чек (фото)",
             "🆘 Техпідтримка",
-            "⬅️ Клієнтське меню",
+            "⬅️ Курєрське меню",
         }
         if text in courier_buttons:
             await update.message.reply_text("❌ Ви не є кур’єром. Якщо треба — зверніться до адміністратора.")
@@ -2249,9 +2271,44 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         await show_my_rating(update, context, uid)
         return True
 
+    if text == "✅ Доставлено":
+        order = get_single_active_order_for_courier(uid)
+        if not order:
+            await update.message.reply_text("Оберіть активне замовлення через «📦 Мої активні».", reply_markup=courier_menu())
+            return True
+        order_id = str(order.get("order_id"))
+        order["status"] = "await_customer"
+        try:
+            if order.get("admin_chat_id") and order.get("admin_msg_id"):
+                await context.bot.delete_message(chat_id=order["admin_chat_id"], message_id=order["admin_msg_id"])
+        except Exception:
+            pass
+        customer_id = order.get("customer_id")
+        try:
+            await context.bot.send_message(
+                chat_id=customer_id,
+                text=(f"🚚 Ваше замовлення №{order_id} доставлено.\nНатисніть кнопку нижче, якщо ви отримали 👇"),
+                reply_markup=kb_customer_done(order_id)
+            )
+        except Exception:
+            pass
+        await update.message.reply_text(f"✅ Позначено як доставлено: №{order_id}", reply_markup=courier_active_order_menu(bool(order.get("delivery_mode") == "buy")))
+        return True
+
+    if text == "📸 Надіслати чек (фото)":
+        order = get_single_active_order_for_courier(uid)
+        if not order or order.get("delivery_mode") != "buy":
+            await update.message.reply_text("Оберіть активне замовлення через «📦 Мої активні».", reply_markup=courier_menu())
+            return True
+        context.application.bot_data.setdefault("check_pending", {})
+        context.application.bot_data["check_pending"][uid] = str(order.get("order_id"))
+        await update.message.reply_text("📸 Надішліть фото чека одним повідомленням (як фото).", reply_markup=courier_active_order_menu(True))
+        return True
+
     if text == "🆘 Техпідтримка":
         # загальна техпідтримка з кур'єр меню (не по конкретному замовленню)
-        SUPPORT_CONTACT_PENDING[uid] = None
+        order = get_single_active_order_for_courier(uid)
+        SUPPORT_CONTACT_PENDING[uid] = str(order.get("order_id")) if order else None
         await update.message.reply_text(
             "🆘 Надішліть номер телефону кнопкою нижче або текстом — адміну прийде ваш контакт.",
             reply_markup=support_share_contact_kb()
@@ -2292,7 +2349,15 @@ async def courier_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("👇 Список активних:", reply_markup=kb_courier_active_list(active_ids))
         return True
 
-    if text == "⬅️ Клієнтське меню":
+    if text == "⬅️ Назад в меню":
+        order = get_single_active_order_for_courier(uid)
+        if order:
+            await update.message.reply_text("Повертаю до меню активного замовлення 👇", reply_markup=courier_active_order_menu(bool(order.get("delivery_mode") == "buy")))
+        else:
+            await update.message.reply_text("Повертаю в меню кур’єра 👇", reply_markup=courier_menu())
+        return True
+
+    if text == "⬅️ Курєрське меню":
         await update.message.reply_text("Ок, показую клієнтське меню 👇", reply_markup=main_menu())
         return True
 
@@ -3439,7 +3504,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SUPPORT_CONTACT_PENDING[courier_id] = order_id
         await context.bot.send_message(
             chat_id=courier_id,
-            text="🆘 Надішліть номер телефону кнопкою нижче — адміну прийде ваш контакт.",
+            text="🆘 Надішліть номер телефону кнопкою нижче або текстом — адміну прийде ваш контакт.",
             reply_markup=support_share_contact_kb()
         )
         try:
@@ -3485,7 +3550,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📞 Телефон клієнта: {order.get('phone','-')}\n"
             )
 
-        await context.bot.send_message(chat_id=courier_id, text=info, parse_mode="Markdown", reply_markup=kb)
+        await context.bot.send_message(chat_id=courier_id, text=info, parse_mode="Markdown", reply_markup=courier_active_order_menu(bool(order.get("delivery_mode") == "buy")))
 
         # contact button (через t.me/username)
         kb_contact = kb_contact_customer(order_id, int(order.get("customer_id") or 0), str(order.get("customer_username") or "-"))
@@ -3574,7 +3639,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=courier_id,
                 text=info,
-                reply_markup=kb
+                reply_markup=courier_active_order_menu(bool(order.get("delivery_mode") == "buy"))
             )
 
             # ✅ окремим повідомленням даємо кнопку "Написати клієнту"
@@ -3685,7 +3750,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SUPPORT_CONTACT_PENDING[courier_id] = order_id
         await context.bot.send_message(
             chat_id=courier_id,
-            text="🆘 Надішліть номер телефону кнопкою нижче — адміну прийде ваш контакт.",
+            text="🆘 Надішліть номер телефону кнопкою нижче або текстом — адміну прийде ваш контакт.",
             reply_markup=support_share_contact_kb()
         )
         return
