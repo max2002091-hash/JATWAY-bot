@@ -3554,7 +3554,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if val == "cancel":
             try:
                 await query.edit_message_text("Скасовано ✅")
-            except Exception:
+            except Exception as e:
+                print(e)
                 pass
             return
 
@@ -3575,7 +3576,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         try:
             await query.edit_message_text(f"🆘 Запит по №{order_id} створено. Надішліть номер в особисті боту.")
-        except Exception:
+        except Exception as e:
+            print(e)
             pass
         return
 
