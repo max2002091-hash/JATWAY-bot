@@ -7,6 +7,7 @@ import sqlite3
 import asyncio
 import time
 import aiohttp
+import html
 from io import StringIO
 from datetime import datetime, timezone, timedelta, date
 from zoneinfo import ZoneInfo
@@ -45,6 +46,7 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
 # ✅ Фіксовані номери підтримки (клієнтська)
 SUPPORT_PHONE_1 = "+380968130807"
+SUPPORT_PHONE_2 = "+380687294365"
 
 # Робочі години
 WORK_HOURS_START = os.getenv("WORK_HOURS_START", "10:00").strip()
@@ -669,7 +671,8 @@ def support_text() -> str:
     return (
         "🛠 Підтримка\n"
         f"📞 Наші номери:\n"
-        f"• {SUPPORT_PHONE_1}\n\n"
+        f"• {SUPPORT_PHONE_1}\n"
+        f"• {SUPPORT_PHONE_2}\n\n"
         "Натисни «📞 Зателефонуйте мені» або напиши свій номер — ми передзвонимо."
     )
 
@@ -2212,12 +2215,17 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
         phone = update.message.text.strip()
 
     u = update.effective_user
+    safe_name = html.escape(u.full_name or "-")
+    safe_username = html.escape(u.username or "-")
+    phone_text = str(phone or "-").strip()
+    phone_digits = re.sub(r"[^\d+]", "", phone_text)
+    phone_line = f'<a href="tel:{html.escape(phone_digits)}">{html.escape(phone_text)}</a>' if phone_digits else html.escape(phone_text)
     msg = (
         "🆘 Запит техпідтримки від кур'єра\n\n"
-        f"Кур'єр: {u.full_name} (@{u.username or '-'})\n"
+        f"Кур'єр: {safe_name} (@{safe_username})\n"
         f"ID: {u.id}\n"
-        f"Телефон: {phone}\n"
-        f"Замовлення: №{order_id}\n"
+        f"Телефон: {phone_line}\n"
+        f"Замовлення: №{html.escape(str(order_id or '-'))}\n"
     )
 
     target_chat_id = OWNER_CHAT_ID or dispatcher_chat_id()
@@ -2227,6 +2235,7 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
             await context.bot.send_message(
                 chat_id=target_chat_id,
                 text=msg,
+                parse_mode="HTML",
                 reply_markup=rm,
             )
         except Exception as e:
@@ -2628,15 +2637,20 @@ async def callme_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CALLME_PHONE
 
     user = update.effective_user
+    safe_name = html.escape(user.full_name or "-")
+    safe_username = html.escape(user.username or "-")
+    phone_text = str(phone_raw or "-").strip()
+    phone_digits = re.sub(r"[^\d+]", "", phone_text)
+    phone_line = f'<a href="tel:{html.escape(phone_digits)}">{html.escape(phone_text)}</a>' if phone_digits else html.escape(phone_text)
     msg = (
         "📞 Запит на дзвінок (клієнт)\n\n"
-        f"👤 {user.full_name} (@{user.username or '-'})\n"
-        f"📞 Номер: {phone_raw}\n"
+        f"👤 {safe_name} (@{safe_username})\n"
+        f"📞 Номер: {phone_line}\n"
         f"🆔 user_id: {user.id}"
     )
     if OWNER_CHAT_ID:
         try:
-            await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg)
+            await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="HTML")
         except Exception:
             await update.message.reply_text("❌ Не вдалося надіслати запит в owner-чат. Перевір OWNER_CHAT_ID і права бота.", reply_markup=main_menu())
             return CHOICE
