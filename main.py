@@ -45,7 +45,6 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
 # ✅ Фіксовані номери підтримки (клієнтська)
 SUPPORT_PHONE_1 = "+380968130807"
-SUPPORT_PHONE_2 = "+380687294365"
 
 # Робочі години
 WORK_HOURS_START = os.getenv("WORK_HOURS_START", "10:00").strip()
@@ -670,8 +669,7 @@ def support_text() -> str:
     return (
         "🛠 Підтримка\n"
         f"📞 Наші номери:\n"
-        f"• {SUPPORT_PHONE_1}\n"
-        f"• {SUPPORT_PHONE_2}\n\n"
+        f"• {SUPPORT_PHONE_1}\n\n"
         "Натисни «📞 Зателефонуйте мені» або напиши свій номер — ми передзвонимо."
     )
 
@@ -2206,7 +2204,6 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
             await context.bot.send_message(
                 chat_id=OWNER_CHAT_ID,
                 text=msg,
-                parse_mode="Markdown",
                 reply_markup=rm,
             )
         except Exception:
