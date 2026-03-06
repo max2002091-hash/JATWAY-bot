@@ -3553,19 +3553,18 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # support pick
-    if data.startswith("support_pick:"):
-        await query.answer()
-        val = data.split(":", 1)[1]
-        if val == "cancel":
-            try:
-                await query.edit_message_text("Скасовано ✅")
-            except Exception as e:
-                await context.bot.send_message(
-            chat_id=courier_id,
-            text=e
-        )
-                pass
-            return
+    if val == "cancel":
+        try:
+             await query.edit_message_text("Скасовано ✅")
+        except Exception as e:
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_CHAT_ID,
+                text=f"support_pick cancel error: {e}"
+            )
+        except Exception:
+            pass
+        return
 
         order_id = val
         order = ORDERS_DB.get(order_id)
