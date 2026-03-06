@@ -3555,7 +3555,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await query.edit_message_text("Скасовано ✅")
             except Exception as e:
-                print(e)
+                await context.bot.send_message(
+            chat_id=courier_id,
+            text=e
+        )
                 pass
             return
 
@@ -3577,7 +3580,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await query.edit_message_text(f"🆘 Запит по №{order_id} створено. Надішліть номер в особисті боту.")
         except Exception as e:
-            print(e)
+            await context.bot.send_message(
+            chat_id=courier_id,
+            text=e
+        )
             pass
         return
 
