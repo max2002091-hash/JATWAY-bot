@@ -345,6 +345,8 @@ def db_blacklist_list() -> List[Tuple[int, str, str]]:
 
 def is_blacklisted_courier(courier_id: int) -> bool:
     return int(courier_id) in BLACKLISTED_COURIERS
+
+
 def db_add_courier(courier_id: int, username: str = "", full_name: str = ""):
     con = db_connect()
     cur = con.cursor()
