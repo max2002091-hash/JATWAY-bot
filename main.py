@@ -2220,6 +2220,12 @@ async def support_contact_handler(update: Update, context: ContextTypes.DEFAULT_
     phone_text = str(phone or "-").strip()
     phone_digits = re.sub(r"[^\d+]", "", phone_text)
     phone_line = f'<a href="tel:{html.escape(phone_digits)}">{html.escape(phone_text)}</a>' if phone_digits else html.escape(phone_text)
+
+    order = ORDERS_DB.get(str(order_id)) if order_id else None
+    if order:
+        order["courier_phone"] = phone_text
+        order["courier_contact_phone"] = phone_text
+
     msg = (
         "🆘 Запит техпідтримки від кур'єра\n\n"
         f"Кур'єр: {safe_name} (@{safe_username})\n"
@@ -2562,16 +2568,29 @@ async def choice_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text == "🆘 Техпідтримка (замовлення)":
             order = ORDERS_DB.get(str(active_order_id))
             u = update.effective_user
+
+            courier_phone_text = str((order or {}).get("courier_phone") or (order or {}).get("courier_contact_phone") or "не вказано").strip()
+            courier_phone_digits = re.sub(r"[^\d+]", "", courier_phone_text)
+            courier_phone_line = (
+                f'<a href="tel:{html.escape(courier_phone_digits)}">{html.escape(courier_phone_text)}</a>'
+                if courier_phone_digits else html.escape(courier_phone_text)
+            )
+            courier_name = html.escape(str((order or {}).get("courier_name") or "-"))
+            courier_username = html.escape(str((order or {}).get("courier_username") or "-").lstrip("@"))
+            customer_name = html.escape(u.full_name or "-")
+            customer_username = html.escape(u.username or "-")
+
             msg = (
                 "🆘 Техпідтримка (клієнт)\n\n"
-                f"Замовлення: №{active_order_id}\n"
-                f"Клієнт: {u.full_name} (@{u.username or '-'})\n"
-                f"ID: {u.id}\\n"
-                f"Телефон: {order.get('phone','-') if order else '-'}\n"
+                f"Замовлення: №{html.escape(str(active_order_id))}\n"
+                f"Клієнт: {customer_name} (@{customer_username})\n"
+                f"ID: {u.id}\n"
+                f"Кур'єр: {courier_name} (@{courier_username})\n"
+                f"Телефон кур'єра: {courier_phone_line}\n"
             )
             if OWNER_CHAT_ID:
                 try:
-                    await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg)
+                    await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="HTML")
                 except Exception:
                     pass
             await update.message.reply_text("✅ Запит відправлено в техпідтримку. Очікуйте відповідь.", reply_markup=customer_active_menu())
